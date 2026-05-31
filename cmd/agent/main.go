@@ -1334,7 +1334,7 @@ func handleNATTask(task *pb.Task) {
 		return
 	}
 
-	conn, err := net.Dial("tcp", nat.Host)
+	conn, err := connectNATTarget(context.Background(), nat.Host, remoteIO, nil)
 	if err != nil {
 		printf("NAT Dial %s 失败：%s", nat.Host, err)
 		return
@@ -1368,6 +1368,21 @@ func handleNATTask(task *pb.Task) {
 type natStreamSender interface {
 	Send(*pb.IOStreamData) error
 	CloseSend() error
+}
+
+type natTargetDialer func(context.Context, string, string) (net.Conn, error)
+
+func connectNATTarget(ctx context.Context, host string, remoteIO natStreamSender, dialer natTargetDialer) (net.Conn, error) {
+	if dialer == nil {
+		d := net.Dialer{}
+		dialer = d.DialContext
+	}
+	conn, err := dialer(ctx, "tcp", host)
+	if err != nil {
+		_ = remoteIO.CloseSend()
+		return nil, err
+	}
+	return conn, nil
 }
 
 func forwardNATConnToStream(reader io.Reader, remoteIO natStreamSender, bufferSize int) {

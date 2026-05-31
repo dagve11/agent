@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
+	"net"
 	"reflect"
 	"testing"
 
@@ -69,5 +71,29 @@ func TestForwardNATConnToStreamClosesOnEOFWithoutExtraFrame(t *testing.T) {
 	}
 	if !stream.closed {
 		t.Fatal("expected stream to be closed")
+	}
+}
+
+func TestConnectNATTargetClosesStreamWhenDialFails(t *testing.T) {
+	stream := &recordingNATStream{}
+	dialer := func(ctx context.Context, network string, address string) (net.Conn, error) {
+		if network != "tcp" {
+			t.Fatalf("network = %q, want tcp", network)
+		}
+		if address != "127.0.0.1:1" {
+			t.Fatalf("address = %q, want 127.0.0.1:1", address)
+		}
+		return nil, errors.New("dial failed")
+	}
+
+	conn, err := connectNATTarget(context.Background(), "127.0.0.1:1", stream, dialer)
+	if err == nil {
+		t.Fatal("expected dial failure")
+	}
+	if conn != nil {
+		t.Fatal("expected nil conn on dial failure")
+	}
+	if !stream.closed {
+		t.Fatal("expected stream CloseSend on dial failure")
 	}
 }
