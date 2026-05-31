@@ -1352,25 +1352,41 @@ func handleNATTask(task *pb.Task) {
 	}()
 	println("NAT init", nat.StreamID)
 
-	go func() {
-		buf := make([]byte, 10240)
-		for {
-			read, err := conn.Read(buf)
-			if err != nil {
-				remoteIO.Send(&pb.IOStreamData{Data: []byte(err.Error())})
-				remoteIO.CloseSend()
-				return
-			}
-			remoteIO.Send(&pb.IOStreamData{Data: buf[:read]})
-		}
-	}()
+	go forwardNATConnToStream(conn, remoteIO, 10240)
 
 	for {
 		var remoteData *pb.IOStreamData
 		if remoteData, err = remoteIO.Recv(); err != nil {
 			return
 		}
-		conn.Write(remoteData.Data)
+		if _, err = conn.Write(remoteData.Data); err != nil {
+			return
+		}
+	}
+}
+
+type natStreamSender interface {
+	Send(*pb.IOStreamData) error
+	CloseSend() error
+}
+
+func forwardNATConnToStream(reader io.Reader, remoteIO natStreamSender, bufferSize int) {
+	if bufferSize <= 0 {
+		bufferSize = 10240
+	}
+	buf := make([]byte, bufferSize)
+	for {
+		read, err := reader.Read(buf)
+		if read > 0 {
+			if sendErr := remoteIO.Send(&pb.IOStreamData{Data: append([]byte(nil), buf[:read]...)}); sendErr != nil {
+				_ = remoteIO.CloseSend()
+				return
+			}
+		}
+		if err != nil {
+			_ = remoteIO.CloseSend()
+			return
+		}
 	}
 }
 
