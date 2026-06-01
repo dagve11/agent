@@ -34,6 +34,9 @@ func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {
 		if !strings.Contains(commandLine, "$serviceName = 'agent.exe'") {
 			t.Fatalf("windows destroy plan must store the service name, got: %s", commandLine)
 		}
+		if !strings.Contains(commandLine, "sc.exe failure $serviceName reset= 0 actions= \"\"") {
+			t.Fatalf("windows destroy plan must disable service failure restart before killing the process, got: %s", commandLine)
+		}
 		if !strings.Contains(commandLine, "sc.exe stop $serviceName") {
 			t.Fatalf("windows destroy plan must stop the installed service, got: %s", commandLine)
 		}

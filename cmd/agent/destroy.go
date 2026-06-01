@@ -45,13 +45,14 @@ func buildDestroyAgentPlan(execPath, configPath, defaultPath string) destroyAgen
 			fmt.Sprintf("$installDir = %s", powerShellSingleQuote(installDir)),
 			"Start-Sleep -Seconds 2",
 			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
+			"if ($svc) { sc.exe failure $serviceName reset= 0 actions= \"\" | Out-Null }",
 			"if ($svc -and $svc.State -ne 'Stopped') { sc.exe stop $serviceName | Out-Null }",
 			"for ($i = 0; $i -lt 20; $i++) { $svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"; if (-not $svc -or $svc.State -eq 'Stopped') { break }; Start-Sleep -Milliseconds 500 }",
 			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
 			"if ($svc -and $svc.ProcessId -gt 0) { Stop-Process -Id $svc.ProcessId -Force; taskkill.exe /PID $svc.ProcessId /F | Out-Null }",
 			"Start-Sleep -Seconds 1",
 			"sc.exe delete $serviceName | Out-Null",
-			"for ($i = 0; $i -lt 20; $i++) { Remove-Item -LiteralPath $installDir -Recurse -Force; if (-not (Test-Path -LiteralPath $installDir)) { break }; Start-Sleep -Milliseconds 500 }",
+			"for ($i = 0; $i -lt 40; $i++) { Remove-Item -LiteralPath $installDir -Recurse -Force; if (-not (Test-Path -LiteralPath $installDir)) { break }; Start-Sleep -Milliseconds 500 }",
 			"Remove-Item -LiteralPath 'C:/install.ps1' -Force",
 		}, "; ")
 		return destroyAgentPlan{
