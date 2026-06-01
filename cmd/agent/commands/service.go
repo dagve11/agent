@@ -2,6 +2,7 @@ package commands
 
 import (
 	"os"
+	"sync"
 
 	"github.com/nezhahq/service"
 )
@@ -10,6 +11,7 @@ type Program struct {
 	Exit    chan struct{}
 	Service service.Service
 	Run     func()
+	once    sync.Once
 }
 
 func (p *Program) Start(s service.Service) error {
@@ -18,7 +20,9 @@ func (p *Program) Start(s service.Service) error {
 }
 
 func (p *Program) Stop(s service.Service) error {
-	close(p.Exit)
+	p.once.Do(func() {
+		close(p.Exit)
+	})
 	if service.Interactive() {
 		os.Exit(0)
 	}

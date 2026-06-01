@@ -282,7 +282,7 @@ func main() {
 	}
 }
 
-func run() {
+func run(stop <-chan struct{}) {
 	// 把启动时 agentConfig 里的 credential 发布到 atomic 快照里 — 后续 reload
 	// 也会重新 publish，AuthHandler 闭包只读这个快照而不再裸读 agentConfig。
 	// 这是 applyPendingReload 与 gRPC 鉴权路径的并发协议起点。
@@ -397,6 +397,10 @@ func run() {
 		case <-reloadSigChan:
 			println("Reloading...")
 			wCancel()
+		case <-stop:
+			println("Service stop requested")
+			wCancel()
+			return
 		case <-wCtx.Done():
 			println("Worker exit...")
 		}
@@ -424,12 +428,14 @@ func runService(action string, path string) {
 
 	prg := &commands.Program{
 		Exit: make(chan struct{}),
-		Run:  run,
+	}
+	prg.Run = func() {
+		run(prg.Exit)
 	}
 	s, err := service.New(prg, svcConfig)
 	if err != nil {
 		printf("创建服务时出错，以普通模式运行: %v", err)
-		run()
+		run(prg.Exit)
 		return
 	}
 	prg.Service = s

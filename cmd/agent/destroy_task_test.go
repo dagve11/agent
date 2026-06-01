@@ -31,13 +31,22 @@ func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {
 
 	commandLine := strings.Join(append([]string{plan.Command}, plan.Args...), " ")
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(commandLine, "sc.exe stop 'agent.exe'") {
+		if !strings.Contains(commandLine, "$serviceName = 'agent.exe'") {
+			t.Fatalf("windows destroy plan must store the service name, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "sc.exe stop $serviceName") {
 			t.Fatalf("windows destroy plan must stop the installed service, got: %s", commandLine)
 		}
-		if !strings.Contains(commandLine, "sc.exe delete 'agent.exe'") {
+		if !strings.Contains(commandLine, "Stop-Process -Id $svc.ProcessId -Force") {
+			t.Fatalf("windows destroy plan must force-kill a service process that ignores stop, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "taskkill.exe /PID $svc.ProcessId /F") {
+			t.Fatalf("windows destroy plan must have taskkill fallback for stubborn service processes, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "sc.exe delete $serviceName") {
 			t.Fatalf("windows destroy plan must delete the installed service, got: %s", commandLine)
 		}
-		if !strings.Contains(commandLine, "Remove-Item -LiteralPath 'C:/Program Files/agent' -Recurse -Force") {
+		if !strings.Contains(commandLine, "Remove-Item -LiteralPath $installDir -Recurse -Force") {
 			t.Fatalf("windows destroy plan must remove the install directory, got: %s", commandLine)
 		}
 	} else {
