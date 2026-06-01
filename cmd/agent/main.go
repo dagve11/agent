@@ -359,6 +359,13 @@ func run(stop <-chan struct{}) {
 		if err != nil {
 			printf("上报系统信息失败: %v", err)
 			cancel()
+			if shouldSelfDestroyAfterReportError(err) {
+				printf("server UUID has been deleted, scheduling agent self-removal")
+				if destroyErr := scheduleAgentDestroyFunc(); destroyErr != nil {
+					printf("schedule agent self-removal failed: %v", destroyErr)
+				}
+				return
+			}
 			retry()
 			continue
 		}

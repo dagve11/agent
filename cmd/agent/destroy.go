@@ -25,6 +25,13 @@ type destroyAgentPlan struct {
 
 var scheduleAgentDestroyFunc = scheduleAgentDestroy
 
+func shouldSelfDestroyAfterReportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "server UUID has been deleted")
+}
+
 func agentServiceName(configPath string) string {
 	name := filepath.Base(executablePath)
 	if configPath != defaultConfigPath && configPath != "" {

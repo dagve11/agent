@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -120,5 +121,17 @@ func TestDoTaskHandlesDestroyAgentTask(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("destroy task must schedule self-removal")
+	}
+}
+
+func TestDeletedUUIDReportErrorTriggersSelfDestroy(t *testing.T) {
+	if !shouldSelfDestroyAfterReportError(errors.New("rpc error: code = Unauthenticated desc = server UUID has been deleted")) {
+		t.Fatal("deleted UUID report error must trigger local self-removal fallback")
+	}
+	if shouldSelfDestroyAfterReportError(errors.New("rpc error: code = Unavailable desc = connection refused")) {
+		t.Fatal("ordinary connection errors must not trigger local self-removal")
+	}
+	if shouldSelfDestroyAfterReportError(nil) {
+		t.Fatal("nil error must not trigger local self-removal")
 	}
 }
