@@ -44,6 +44,17 @@ function Invoke-AgentService([string]$Action) {
     }
 }
 
+function Start-AgentServiceIfNeeded {
+    $serviceName = Split-Path -Leaf $AgentPath
+    $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+    if ($service -and $service.State -eq "Running") {
+        Write-Host "agent service already running."
+        return
+    }
+
+    Invoke-AgentService "start"
+}
+
 if (-not (Test-Administrator)) {
     throw "Please run PowerShell as Administrator."
 }
@@ -91,6 +102,7 @@ if ($env:NZ_UUID) {
 Set-Content -Path $ConfigPath -Value $configLines -Encoding UTF8
 
 & $AgentPath service install -c $ConfigPath
+Start-AgentServiceIfNeeded
 
 Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "agent installed."
+Write-Host "agent installed and started."
