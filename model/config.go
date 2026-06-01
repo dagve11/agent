@@ -110,6 +110,10 @@ func (c *AgentConfig) Save() error {
 	return os.Chmod(c.filePath, 0600)
 }
 
+func (c *AgentConfig) ConfigPath() string {
+	return c.filePath
+}
+
 func ValidateConfig(c *AgentConfig, isRemoteEdit bool) error {
 	if c.ReportDelay == 0 {
 		c.ReportDelay = 3

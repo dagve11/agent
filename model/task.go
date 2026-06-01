@@ -22,6 +22,10 @@ const (
 	TaskTypeFsWrite
 	TaskTypeFsDelete
 	TaskTypeFsTransfer
+
+	// Dashboard uses the same fixed wire value. Do not insert new task types
+	// before this without updating both repositories.
+	TaskTypeDestroyAgent
 )
 
 type TerminalTask struct {

@@ -411,11 +411,7 @@ func runService(action string, path string) {
 	}
 
 	args := []string{"-c", path}
-	name := filepath.Base(executablePath)
-	if path != defaultConfigPath && path != "" {
-		hex := util.MD5Sum(path)[:7]
-		name = fmt.Sprintf("%s-%s", name, hex)
-	}
+	name := agentServiceName(path)
 
 	svcConfig := &service.Config{
 		Name:             name,
@@ -575,6 +571,8 @@ func doTask(task *pb.Task) *pb.TaskResult {
 	case model.TaskTypeFsTransfer:
 		handleFsTransferTask(task)
 		return nil
+	case model.TaskTypeDestroyAgent:
+		handleDestroyAgentTask(&result)
 	case model.TaskTypeKeepalive:
 	default:
 		printf("不支持的任务: %v", task)
