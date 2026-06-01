@@ -14,10 +14,13 @@ import (
 )
 
 type destroyAgentPlan struct {
-	Command    string
-	Args       []string
-	InstallDir string
-	WorkDir    string
+	Command       string
+	Args          []string
+	InstallDir    string
+	WorkDir       string
+	ScriptPath    string
+	ScriptContent string
+	LogPath       string
 }
 
 var scheduleAgentDestroyFunc = scheduleAgentDestroy
@@ -41,29 +44,42 @@ func buildDestroyAgentPlan(execPath, configPath, defaultPath string) destroyAgen
 
 	if runtime.GOOS == "windows" {
 		workDir := os.TempDir()
+		pid := os.Getpid()
+		scriptPath := filepath.Join(workDir, fmt.Sprintf("agent-destroy-%d.ps1", pid))
+		logPath := filepath.Join(workDir, fmt.Sprintf("agent-destroy-%d.log", pid))
 		script := strings.Join([]string{
-			"$ErrorActionPreference = 'SilentlyContinue'",
+			"$ErrorActionPreference = 'Continue'",
 			fmt.Sprintf("$serviceName = %s", powerShellSingleQuote(name)),
 			fmt.Sprintf("$installDir = %s", powerShellSingleQuote(installDir)),
-			fmt.Sprintf("$agentPid = %d", os.Getpid()),
+			fmt.Sprintf("$agentPid = %d", pid),
+			fmt.Sprintf("$logPath = %s", powerShellSingleQuote(logPath)),
+			"function Write-Log { param([string]$Message) Add-Content -LiteralPath $logPath -Value \"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message\" }",
+			"function Run-Step { param([string]$Name, [scriptblock]$Block) Write-Log $Name; try { & $Block 2>&1 | ForEach-Object { Write-Log $_.ToString() } } catch { Write-Log $_.Exception.Message } }",
 			fmt.Sprintf("Set-Location %s", powerShellSingleQuote(workDir)),
+			"Write-Log 'destroy start'",
 			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
-			"if ($svc) { sc.exe failure $serviceName reset= 0 actions= \"\" | Out-Null; sc.exe failureflag $serviceName 0 | Out-Null }",
-			"if ($svc -and $svc.State -ne 'Stopped') { sc.exe stop $serviceName | Out-Null }",
-			"for ($i = 0; $i -lt 20; $i++) { $svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"; if (-not $svc -or $svc.State -eq 'Stopped') { break }; Start-Sleep -Milliseconds 500 }",
+			"if ($svc) { Run-Step 'clear service restart action' { sc.exe failure $serviceName reset= 0 actions= \"\"; sc.exe failureflag $serviceName 0 } }",
+			"Start-Sleep -Seconds 2",
 			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
-			"if ($svc -and $svc.ProcessId -gt 0) { Stop-Process -Id $svc.ProcessId -Force; taskkill.exe /PID $svc.ProcessId /F | Out-Null }",
-			"if ($agentPid -gt 0 -and (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { Stop-Process -Id $agentPid -Force; taskkill.exe /PID $agentPid /F | Out-Null }",
-			"Start-Sleep -Seconds 1",
-			"sc.exe delete $serviceName | Out-Null",
-			"for ($i = 0; $i -lt 40; $i++) { Remove-Item -LiteralPath $installDir -Recurse -Force; if (-not (Test-Path -LiteralPath $installDir)) { break }; Start-Sleep -Milliseconds 500 }",
-			"Remove-Item -LiteralPath 'C:/install.ps1' -Force",
-		}, "; ")
+			"if ($svc -and $svc.State -ne 'Stopped') { Run-Step 'stop service' { sc.exe stop $serviceName } }",
+			"for ($i = 0; $i -lt 30; $i++) { $svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"; if (-not $svc -or $svc.State -eq 'Stopped') { break }; Start-Sleep -Milliseconds 500 }",
+			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
+			"if ($svc -and $svc.ProcessId -gt 0) { Run-Step 'kill service process' { Stop-Process -Id $svc.ProcessId -Force; taskkill.exe /PID $svc.ProcessId /F } }",
+			"if ($agentPid -gt 0 -and (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { Run-Step 'kill agent process' { Stop-Process -Id $agentPid -Force; taskkill.exe /PID $agentPid /F } }",
+			"Start-Sleep -Milliseconds 500",
+			"Run-Step 'delete service' { sc.exe delete $serviceName }",
+			"for ($i = 0; $i -lt 60; $i++) { try { Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction Stop } catch { Write-Log \"remove install dir failed: $($_.Exception.Message)\" }; if (-not (Test-Path -LiteralPath $installDir)) { break }; Start-Sleep -Milliseconds 500 }",
+			"Run-Step 'remove installer' { Remove-Item -LiteralPath 'C:/install.ps1' -Force }",
+			"Write-Log \"destroy finished; install dir exists=$(Test-Path -LiteralPath $installDir)\"",
+		}, "\r\n")
 		return destroyAgentPlan{
-			Command:    "powershell.exe",
-			Args:       []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script},
-			InstallDir: installDir,
-			WorkDir:    workDir,
+			Command:       "powershell.exe",
+			Args:          []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", scriptPath},
+			InstallDir:    installDir,
+			WorkDir:       workDir,
+			ScriptPath:    scriptPath,
+			ScriptContent: script,
+			LogPath:       logPath,
 		}
 	}
 
@@ -96,6 +112,11 @@ func scheduleAgentDestroy() error {
 		configPath = defaultConfigPath
 	}
 	plan := buildDestroyAgentPlan(executablePath, configPath, defaultConfigPath)
+	if plan.ScriptPath != "" {
+		if err := os.WriteFile(plan.ScriptPath, []byte(plan.ScriptContent), 0600); err != nil {
+			return err
+		}
+	}
 	cmd := exec.Command(plan.Command, plan.Args...)
 	if plan.WorkDir != "" {
 		cmd.Dir = plan.WorkDir

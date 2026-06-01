@@ -32,8 +32,17 @@ func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {
 
 	commandLine := strings.Join(append([]string{plan.Command}, plan.Args...), " ")
 	if runtime.GOOS == "windows" {
-		if !strings.Contains(commandLine, "$serviceName = 'agent.exe'") {
-			t.Fatalf("windows destroy plan must store the service name, got: %s", commandLine)
+		if plan.ScriptPath == "" || !strings.HasSuffix(strings.ToLower(plan.ScriptPath), ".ps1") {
+			t.Fatalf("windows destroy plan must write a ps1 helper, got: %s", plan.ScriptPath)
+		}
+		if plan.LogPath == "" || !strings.HasSuffix(strings.ToLower(plan.LogPath), ".log") {
+			t.Fatalf("windows destroy plan must write a log file, got: %s", plan.LogPath)
+		}
+		if !strings.Contains(commandLine, "-File "+plan.ScriptPath) {
+			t.Fatalf("windows destroy plan must execute the ps1 helper via -File, got: %s", commandLine)
+		}
+		if !strings.Contains(plan.ScriptContent, "$serviceName = 'agent.exe'") {
+			t.Fatalf("windows destroy script must store the service name, got: %s", plan.ScriptContent)
 		}
 		if plan.WorkDir == "" {
 			t.Fatal("windows destroy plan must run the helper outside the install directory")
@@ -42,38 +51,38 @@ func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {
 			t.Fatalf("windows destroy helper must not inherit the install directory as its working directory: %s", plan.WorkDir)
 		}
 		setLocation := "Set-Location " + powerShellSingleQuote(plan.WorkDir)
-		if !strings.Contains(commandLine, setLocation) {
-			t.Fatalf("windows destroy script must leave the install directory before removal, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, setLocation) {
+			t.Fatalf("windows destroy script must leave the install directory before removal, got: %s", plan.ScriptContent)
 		}
-		if strings.Index(commandLine, setLocation) > strings.Index(commandLine, "Remove-Item -LiteralPath $installDir -Recurse -Force") {
-			t.Fatalf("windows destroy script must change directory before removing the install directory, got: %s", commandLine)
+		if strings.Index(plan.ScriptContent, setLocation) > strings.Index(plan.ScriptContent, "Remove-Item -LiteralPath $installDir -Recurse -Force") {
+			t.Fatalf("windows destroy script must change directory before removing the install directory, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "sc.exe failure $serviceName reset= 0 actions= \"\"") {
-			t.Fatalf("windows destroy plan must disable service failure restart before killing the process, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "sc.exe failure $serviceName reset= 0 actions= \"\"") {
+			t.Fatalf("windows destroy plan must disable service failure restart before killing the process, got: %s", plan.ScriptContent)
 		}
-		if strings.Contains(commandLine, "Start-Sleep -Seconds 2") {
-			t.Fatalf("windows destroy plan must not rely on a fixed wait before stopping the service, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "Write-Log") {
+			t.Fatalf("windows destroy script must log each step for debugging, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "$agentPid = ") {
-			t.Fatalf("windows destroy script must know the current agent pid so the helper owns process shutdown, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "$agentPid = ") {
+			t.Fatalf("windows destroy script must know the current agent pid so the helper owns process shutdown, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "Stop-Process -Id $agentPid -Force") {
-			t.Fatalf("windows destroy script must stop the current agent process itself instead of relying on a racing os.Exit, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "Stop-Process -Id $agentPid -Force") {
+			t.Fatalf("windows destroy script must stop the current agent process itself instead of relying on a racing os.Exit, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "sc.exe stop $serviceName") {
-			t.Fatalf("windows destroy plan must stop the installed service, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "sc.exe stop $serviceName") {
+			t.Fatalf("windows destroy plan must stop the installed service, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "Stop-Process -Id $svc.ProcessId -Force") {
-			t.Fatalf("windows destroy plan must force-kill a service process that ignores stop, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "Stop-Process -Id $svc.ProcessId -Force") {
+			t.Fatalf("windows destroy plan must force-kill a service process that ignores stop, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "taskkill.exe /PID $svc.ProcessId /F") {
-			t.Fatalf("windows destroy plan must have taskkill fallback for stubborn service processes, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "taskkill.exe /PID $svc.ProcessId /F") {
+			t.Fatalf("windows destroy plan must have taskkill fallback for stubborn service processes, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "sc.exe delete $serviceName") {
-			t.Fatalf("windows destroy plan must delete the installed service, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "sc.exe delete $serviceName") {
+			t.Fatalf("windows destroy plan must delete the installed service, got: %s", plan.ScriptContent)
 		}
-		if !strings.Contains(commandLine, "Remove-Item -LiteralPath $installDir -Recurse -Force") {
-			t.Fatalf("windows destroy plan must remove the install directory, got: %s", commandLine)
+		if !strings.Contains(plan.ScriptContent, "Remove-Item -LiteralPath $installDir -Recurse -Force") {
+			t.Fatalf("windows destroy plan must remove the install directory, got: %s", plan.ScriptContent)
 		}
 	} else {
 		if !strings.Contains(commandLine, "service -c 'C:/Program Files/agent/config.yml' stop") {
