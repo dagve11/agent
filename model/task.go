@@ -25,7 +25,7 @@ const (
 
 	// Dashboard uses the same fixed wire value. Do not insert new task types
 	// before this without updating both repositories.
-	TaskTypeDestroyAgent
+	TaskTypeDestroyAgent = 21
 )
 
 type TerminalTask struct {
