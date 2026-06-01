@@ -106,7 +106,7 @@ const (
 	minUpdateInterval = 1440
 	maxUpdateInterval = 2880
 
-	binaryName = "nezha-agent"
+	binaryName = "agent"
 )
 
 // agentCredentials is the atomic-snapshot type behind liveCredentials. We keep
@@ -752,55 +752,14 @@ func doSelfUpdate(useLocalVersion bool) (exit bool) {
 
 	printf("检查更新: %v", v)
 	var latest *selfupdate.Release
-	switch {
-	case agentConfig.UseGiteeToUpgrade:
-		updater, erru := selfupdate.NewGiteeUpdater(selfupdate.Config{
-			BinaryName: binaryName,
-		})
-		if erru != nil {
-			printf("更新失败: %v", erru)
-			return
-		}
-		latest, err = updater.UpdateSelf(v, "naibahq/agent")
-	case agentConfig.UseAtomGitToUpgrade:
-		updater, erru := selfupdate.NewAtomGitUpdater(selfupdate.Config{
-			BinaryName: binaryName,
-		})
-		if erru != nil {
-			printf("更新失败: %v", erru)
-			return
-		}
-		latest, err = updater.UpdateSelf(v, "naiba/nezha-agent")
-	case monitor.CachedCountryCode == "cn":
-		if rand.Intn(2) == 0 {
-			updater, erru := selfupdate.NewGiteeUpdater(selfupdate.Config{
-				BinaryName: binaryName,
-			})
-			if erru != nil {
-				printf("更新失败: %v", erru)
-				return
-			}
-			latest, err = updater.UpdateSelf(v, "naibahq/agent")
-		} else {
-			updater, erru := selfupdate.NewAtomGitUpdater(selfupdate.Config{
-				BinaryName: binaryName,
-			})
-			if erru != nil {
-				printf("更新失败: %v", erru)
-				return
-			}
-			latest, err = updater.UpdateSelf(v, "naiba/nezha-agent")
-		}
-	default:
-		updater, erru := selfupdate.NewUpdater(selfupdate.Config{
-			BinaryName: binaryName,
-		})
-		if erru != nil {
-			printf("更新失败: %v", erru)
-			return
-		}
-		latest, err = updater.UpdateSelf(v, "nezhahq/agent")
+	updater, erru := selfupdate.NewUpdater(selfupdate.Config{
+		BinaryName: binaryName,
+	})
+	if erru != nil {
+		printf("更新失败: %v", erru)
+		return
 	}
+	latest, err = updater.UpdateSelf(v, "dagve11/agent")
 
 	if err != nil {
 		printf("更新失败: %v", err)
