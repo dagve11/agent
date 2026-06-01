@@ -91,7 +91,6 @@ if ($env:NZ_UUID) {
 Set-Content -Path $ConfigPath -Value $configLines -Encoding UTF8
 
 & $AgentPath service install -c $ConfigPath
-& $AgentPath service start -c $ConfigPath
 
 Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "agent installed and started."
+Write-Host "agent installed."
