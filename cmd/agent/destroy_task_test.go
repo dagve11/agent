@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -34,11 +35,30 @@ func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {
 		if !strings.Contains(commandLine, "$serviceName = 'agent.exe'") {
 			t.Fatalf("windows destroy plan must store the service name, got: %s", commandLine)
 		}
+		if plan.WorkDir == "" {
+			t.Fatal("windows destroy plan must run the helper outside the install directory")
+		}
+		if strings.EqualFold(filepath.Clean(plan.WorkDir), filepath.Clean(plan.InstallDir)) {
+			t.Fatalf("windows destroy helper must not inherit the install directory as its working directory: %s", plan.WorkDir)
+		}
+		setLocation := "Set-Location " + powerShellSingleQuote(plan.WorkDir)
+		if !strings.Contains(commandLine, setLocation) {
+			t.Fatalf("windows destroy script must leave the install directory before removal, got: %s", commandLine)
+		}
+		if strings.Index(commandLine, setLocation) > strings.Index(commandLine, "Remove-Item -LiteralPath $installDir -Recurse -Force") {
+			t.Fatalf("windows destroy script must change directory before removing the install directory, got: %s", commandLine)
+		}
 		if !strings.Contains(commandLine, "sc.exe failure $serviceName reset= 0 actions= \"\"") {
 			t.Fatalf("windows destroy plan must disable service failure restart before killing the process, got: %s", commandLine)
 		}
-		if strings.Index(commandLine, "sc.exe failure $serviceName reset= 0 actions= \"\"") > strings.Index(commandLine, "Start-Sleep -Seconds 2") {
-			t.Fatalf("windows destroy plan must disable service failure restart before waiting for agent exit, got: %s", commandLine)
+		if strings.Contains(commandLine, "Start-Sleep -Seconds 2") {
+			t.Fatalf("windows destroy plan must not rely on a fixed wait before stopping the service, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "$agentPid = ") {
+			t.Fatalf("windows destroy script must know the current agent pid so the helper owns process shutdown, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "Stop-Process -Id $agentPid -Force") {
+			t.Fatalf("windows destroy script must stop the current agent process itself instead of relying on a racing os.Exit, got: %s", commandLine)
 		}
 		if !strings.Contains(commandLine, "sc.exe stop $serviceName") {
 			t.Fatalf("windows destroy plan must stop the installed service, got: %s", commandLine)

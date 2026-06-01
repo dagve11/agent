@@ -17,6 +17,7 @@ type destroyAgentPlan struct {
 	Command    string
 	Args       []string
 	InstallDir string
+	WorkDir    string
 }
 
 var scheduleAgentDestroyFunc = scheduleAgentDestroy
@@ -39,17 +40,20 @@ func buildDestroyAgentPlan(execPath, configPath, defaultPath string) destroyAgen
 	}
 
 	if runtime.GOOS == "windows" {
+		workDir := os.TempDir()
 		script := strings.Join([]string{
 			"$ErrorActionPreference = 'SilentlyContinue'",
 			fmt.Sprintf("$serviceName = %s", powerShellSingleQuote(name)),
 			fmt.Sprintf("$installDir = %s", powerShellSingleQuote(installDir)),
+			fmt.Sprintf("$agentPid = %d", os.Getpid()),
+			fmt.Sprintf("Set-Location %s", powerShellSingleQuote(workDir)),
 			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
-			"if ($svc) { sc.exe failure $serviceName reset= 0 actions= \"\" | Out-Null }",
-			"Start-Sleep -Seconds 2",
+			"if ($svc) { sc.exe failure $serviceName reset= 0 actions= \"\" | Out-Null; sc.exe failureflag $serviceName 0 | Out-Null }",
 			"if ($svc -and $svc.State -ne 'Stopped') { sc.exe stop $serviceName | Out-Null }",
 			"for ($i = 0; $i -lt 20; $i++) { $svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"; if (-not $svc -or $svc.State -eq 'Stopped') { break }; Start-Sleep -Milliseconds 500 }",
 			"$svc = Get-CimInstance Win32_Service -Filter \"Name='$serviceName'\"",
 			"if ($svc -and $svc.ProcessId -gt 0) { Stop-Process -Id $svc.ProcessId -Force; taskkill.exe /PID $svc.ProcessId /F | Out-Null }",
+			"if ($agentPid -gt 0 -and (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { Stop-Process -Id $agentPid -Force; taskkill.exe /PID $agentPid /F | Out-Null }",
 			"Start-Sleep -Seconds 1",
 			"sc.exe delete $serviceName | Out-Null",
 			"for ($i = 0; $i -lt 40; $i++) { Remove-Item -LiteralPath $installDir -Recurse -Force; if (-not (Test-Path -LiteralPath $installDir)) { break }; Start-Sleep -Milliseconds 500 }",
@@ -59,6 +63,7 @@ func buildDestroyAgentPlan(execPath, configPath, defaultPath string) destroyAgen
 			Command:    "powershell.exe",
 			Args:       []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script},
 			InstallDir: installDir,
+			WorkDir:    workDir,
 		}
 	}
 
@@ -92,13 +97,18 @@ func scheduleAgentDestroy() error {
 	}
 	plan := buildDestroyAgentPlan(executablePath, configPath, defaultConfigPath)
 	cmd := exec.Command(plan.Command, plan.Args...)
+	if plan.WorkDir != "" {
+		cmd.Dir = plan.WorkDir
+	}
 	if err := detachAgentDestroyCommand(cmd); err != nil {
 		return err
 	}
-	go func() {
-		time.Sleep(time.Second)
-		os.Exit(0)
-	}()
+	if runtime.GOOS != "windows" {
+		go func() {
+			time.Sleep(time.Second)
+			os.Exit(0)
+		}()
+	}
 	return nil
 }
 
