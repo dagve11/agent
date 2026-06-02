@@ -54,6 +54,18 @@ quote_yaml() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
+read_existing_uuid() {
+    if [ -n "${NZ_UUID:-}" ] || [ ! -f "$CONFIG_PATH" ]; then
+        return
+    fi
+
+    uuid="$(sed -n "s/^[[:space:]]*uuid:[[:space:]]*['\"]\\{0,1\\}\\([^'\"]*\\)['\"]\\{0,1\\}[[:space:]]*$/\\1/p" "$CONFIG_PATH" | head -n 1)"
+    if [ -n "$uuid" ]; then
+        NZ_UUID="$uuid"
+        export NZ_UUID
+    fi
+}
+
 write_config() {
     if [ -z "${NZ_SERVER:-}" ]; then
         err "NZ_SERVER should not be empty"
@@ -107,6 +119,7 @@ install_agent() {
     fi
 
     run_as_root mkdir -p "$AGENT_PATH"
+    read_existing_uuid
     if [ -x "${AGENT_PATH}/agent" ]; then
         run_as_root "${AGENT_PATH}/agent" service -c "$CONFIG_PATH" stop >/dev/null 2>&1 || true
         run_as_root "${AGENT_PATH}/agent" service -c "$CONFIG_PATH" uninstall >/dev/null 2>&1 || true

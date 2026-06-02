@@ -34,6 +34,22 @@ function Get-RequiredEnv([string]$Name) {
     return $value
 }
 
+function Get-ExistingAgentUuid {
+    if (-not (Test-Path $ConfigPath)) {
+        return $null
+    }
+
+    $match = Get-Content -Path $ConfigPath -ErrorAction SilentlyContinue |
+        Select-String -Pattern "^\s*uuid:\s*['""]?([^'""]+)['""]?\s*$" |
+        Select-Object -First 1
+
+    if ($match) {
+        return $match.Matches[0].Groups[1].Value
+    }
+
+    return $null
+}
+
 function Invoke-AgentService([string]$Action) {
     if (Test-Path $AgentPath) {
         try {
@@ -84,6 +100,7 @@ if (-not $downloadedAgent) {
     throw "agent.exe was not found in release asset."
 }
 
+$existingUuid = Get-ExistingAgentUuid
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Invoke-AgentService "stop"
 Invoke-AgentService "uninstall"
@@ -97,6 +114,8 @@ $configLines = @(
 
 if ($env:NZ_UUID) {
     $configLines += "uuid: $(Quote-YamlString $env:NZ_UUID)"
+} elseif ($existingUuid) {
+    $configLines += "uuid: $(Quote-YamlString $existingUuid)"
 }
 
 Set-Content -Path $ConfigPath -Value $configLines -Encoding UTF8

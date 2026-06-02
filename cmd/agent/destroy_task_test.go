@@ -86,14 +86,35 @@ func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {
 			t.Fatalf("windows destroy plan must remove the install directory, got: %s", plan.ScriptContent)
 		}
 	} else {
-		if !strings.Contains(commandLine, "service -c 'C:/Program Files/agent/config.yml' stop") {
-			t.Fatalf("unix destroy plan must stop the installed service via the agent binary, got: %s", commandLine)
+		if plan.ScriptPath == "" || !strings.HasSuffix(strings.ToLower(plan.ScriptPath), ".sh") {
+			t.Fatalf("unix destroy plan must write a shell helper, got: %s", plan.ScriptPath)
 		}
-		if !strings.Contains(commandLine, "service -c 'C:/Program Files/agent/config.yml' uninstall") {
-			t.Fatalf("unix destroy plan must uninstall the installed service via the agent binary, got: %s", commandLine)
+		if plan.LogPath == "" || !strings.HasSuffix(strings.ToLower(plan.LogPath), ".log") {
+			t.Fatalf("unix destroy plan must write a log file, got: %s", plan.LogPath)
 		}
-		if !strings.Contains(commandLine, "rm -rf 'C:/Program Files/agent'") {
-			t.Fatalf("unix destroy plan must remove the install directory, got: %s", commandLine)
+		if plan.WorkDir == "" {
+			t.Fatal("unix destroy plan must run the helper outside the install directory")
+		}
+		if strings.EqualFold(filepath.Clean(plan.WorkDir), filepath.Clean(plan.InstallDir)) {
+			t.Fatalf("unix destroy helper must not inherit the install directory as its working directory: %s", plan.WorkDir)
+		}
+		if !strings.Contains(commandLine, "systemd-run") {
+			t.Fatalf("unix destroy plan must prefer systemd-run so cleanup survives service stop, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "KillMode=process") {
+			t.Fatalf("unix destroy plan must keep the cleanup process outside the original service cgroup cleanup, got: %s", commandLine)
+		}
+		if !strings.Contains(commandLine, "nohup") {
+			t.Fatalf("unix destroy plan must keep a nohup fallback for non-systemd hosts, got: %s", commandLine)
+		}
+		if !strings.Contains(plan.ScriptContent, "service -c 'C:/Program Files/agent/config.yml' stop") {
+			t.Fatalf("unix destroy plan must stop the installed service via the agent binary, got: %s", plan.ScriptContent)
+		}
+		if !strings.Contains(plan.ScriptContent, "service -c 'C:/Program Files/agent/config.yml' uninstall") {
+			t.Fatalf("unix destroy plan must uninstall the installed service via the agent binary, got: %s", plan.ScriptContent)
+		}
+		if !strings.Contains(plan.ScriptContent, "rm -rf 'C:/Program Files/agent'") {
+			t.Fatalf("unix destroy plan must remove the install directory, got: %s", plan.ScriptContent)
 		}
 	}
 }
