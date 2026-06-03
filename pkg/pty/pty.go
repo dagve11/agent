@@ -35,7 +35,7 @@ func Start() (IPty, error) {
 	if shellPath == "" {
 		return nil, errors.New("没有可用终端")
 	}
-	cmd := exec.Command(shellPath) // #nosec
+	cmd := loginShellCommand(shellPath)
 	cmd.Env = append(os.Environ(), "TERM=xterm")
 	tty, err := opty.Start(cmd)
 	return &Pty{tty: tty, cmd: cmd}, err

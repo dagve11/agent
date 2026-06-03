@@ -1215,8 +1215,10 @@ func handleTerminalTask(task *pb.Task) {
 		return
 	}
 
+	sender := newSerialIOStreamSender(remoteIO)
+
 	// 发送 StreamID
-	if err := remoteIO.Send(&pb.IOStreamData{Data: append([]byte{
+	if err := sender.Send(&pb.IOStreamData{Data: append([]byte{
 		0xff, 0x05, 0xff, 0x05,
 	}, []byte(terminal.StreamID)...)}); err != nil {
 		printf("Terminal 发送StreamID失败: %v", err)
@@ -1232,7 +1234,7 @@ func handleTerminalTask(task *pb.Task) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go ioStreamKeepAlive(ctx, remoteIO)
+	go serializedKeepAlive(ctx, sender, 30*time.Second)
 
 	defer func() {
 		err := tty.Close()
@@ -1242,15 +1244,8 @@ func handleTerminalTask(task *pb.Task) {
 	println("terminal init", terminal.StreamID)
 
 	go func() {
-		buf := make([]byte, 10240)
-		for {
-			read, err := tty.Read(buf)
-			if err != nil {
-				remoteIO.Send(&pb.IOStreamData{Data: []byte(err.Error())})
-				remoteIO.CloseSend()
-				return
-			}
-			remoteIO.Send(&pb.IOStreamData{Data: buf[:read]})
+		if err := forwardTerminalOutput(tty, sender, terminalOutputFlushInterval, terminalOutputMaxBatchBytes); err != nil {
+			remoteIO.CloseSend()
 		}
 	}()
 
