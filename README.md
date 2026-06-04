@@ -24,6 +24,7 @@ agent_linux_arm64.zip
 - Windows 安装目录默认为 `C:\Program Files\agent`。
 - Linux 安装目录默认为 `/opt/agent/agent`。
 - Release 包内二进制名称统一为 `agent` / `agent.exe`。
+- Unix 安装脚本包含原版风格的依赖检查、初始化系统检测、架构检测、地区检测和已有安装检测。
 - 安装脚本重复执行时会保留已有 `uuid`，避免同一台机器重复注册成新服务器。
 - 支持 Dashboard 下发 `TaskTypeDestroyAgent = 21` 后自删除。
 - 支持服务器 UUID 被 Dashboard 删除后，Agent 在下一次上报被拒绝时触发自删除。

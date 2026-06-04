@@ -18,6 +18,38 @@ need_cmd() {
     fi
 }
 
+deps_check() {
+    missing=""
+    for dep in curl wget unzip grep sed head uname mktemp readlink; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            missing="${missing} ${dep}"
+        fi
+    done
+
+    if [ -n "$missing" ]; then
+        err "missing required command(s):${missing}"
+        exit 1
+    fi
+}
+
+check_init() {
+    INIT="unknown"
+    case "$(uname)" in
+        *Linux*)
+            init="$(readlink /sbin/init 2>/dev/null || true)"
+            case "$init" in
+                *systemd*) INIT=systemd ;;
+                *openrc-init*|*busybox*) INIT=openrc ;;
+                *) err "Unknown init"; exit 1 ;;
+            esac
+            ;;
+        *Darwin*) INIT=launchd ;;
+        *FreeBSD*) INIT=freebsd ;;
+        *) err "unsupported system: $(uname)"; exit 1 ;;
+    esac
+    export INIT
+}
+
 geo_check() {
     if [ -n "${CN:-}" ]; then
         return
@@ -53,7 +85,7 @@ run_as_root() {
     fi
 }
 
-detect_target() {
+env_check() {
     case "$(uname -m)" in
         amd64|x86_64) os_arch="amd64" ;;
         i386|i686) os_arch="386" ;;
@@ -73,6 +105,19 @@ detect_target() {
         *FreeBSD*) os="freebsd" ;;
         *) err "unsupported system: $(uname)"; exit 1 ;;
     esac
+}
+
+installation_check() {
+    INSTALLATION_TYPE=none
+    AGENT_STANDALONE_INSTALLED=false
+
+    if [ -x "${AGENT_PATH}/agent" ] || [ -f "$CONFIG_PATH" ]; then
+        AGENT_STANDALONE_INSTALLED=true
+        INSTALLATION_TYPE=standalone
+        printf '%s\n' "existing standalone agent installation found at ${AGENT_PATH}"
+    fi
+
+    export INSTALLATION_TYPE AGENT_STANDALONE_INSTALLED
 }
 
 quote_yaml() {
@@ -199,8 +244,10 @@ download_release_asset() {
 }
 
 install_agent() {
-    detect_target
-    need_cmd unzip
+    deps_check
+    env_check
+    check_init
+    installation_check
 
     asset="agent_${os}_${os_arch}.zip"
     tmp_dir="$(mktemp -d)"
