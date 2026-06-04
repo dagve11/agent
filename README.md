@@ -16,7 +16,7 @@ agent_linux_amd64.zip
 agent_linux_arm64.zip
 ```
 
-安装脚本会从当前仓库的 GitHub Release latest 下载对应平台的压缩包。
+安装脚本默认从当前仓库的 GitHub Release latest 下载对应平台的压缩包；如果检测到中国大陆网络，会优先从 `https://gitee.com/AGZZY11/agent` 的 latest Release 下载对应压缩包，失败后再回退到 GitHub。
 
 ## 当前定制内容
 
@@ -118,6 +118,7 @@ sh install.sh
 | `NZ_TLS` | 否 | 是否使用 TLS，`true` 或 `false`，默认 `false` |
 | `NZ_UUID` | 否 | 指定 Agent UUID；不指定时自动生成或复用旧配置 |
 | `NZ_AGENT_REPO` | 否 | 下载 Release 的仓库，默认 `dagve11/agent` |
+| `NZ_GITEE_REPO` | 否 | 国内网络下优先使用的 Gitee Release 仓库，默认 `AGZZY11/agent` |
 | `NZ_INSTALL_DIR` | 否 | Windows 安装目录，默认 `C:\Program Files\agent` |
 | `NZ_BASE_PATH` | 否 | Unix 安装根目录，默认 `/opt/agent` |
 
