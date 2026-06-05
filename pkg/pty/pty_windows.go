@@ -33,7 +33,7 @@ func Start() (IPty, error) {
 	if err != nil {
 		return nil, err
 	}
-	tty, err := conpty.Start(shellPath, conpty.ConPtyWorkDir(path))
+	tty, err := conpty.Start(shellPath, conpty.ConPtyWorkDir(path), conpty.ConPtyEnv(windowsTerminalEnv()))
 	return &Pty{tty: tty}, err
 }
 
