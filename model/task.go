@@ -26,6 +26,7 @@ const (
 	// Dashboard uses the same fixed wire value. Do not insert new task types
 	// before this without updating both repositories.
 	TaskTypeDestroyAgent = 21
+	TaskTypeVPNControl   = 22
 )
 
 type TerminalTask struct {
@@ -39,6 +40,109 @@ type TaskNAT struct {
 
 type TaskFM struct {
 	StreamID string
+}
+
+const (
+	VPNActionPrepare = "prepare"
+	VPNActionStart   = "start"
+	VPNActionStop    = "stop"
+	VPNActionRestart = "restart"
+	VPNActionStatus  = "status"
+	VPNActionLogs    = "logs"
+	VPNActionCleanup = "cleanup"
+)
+
+const (
+	VPNRoleEntry = "entry"
+	VPNRoleExit  = "exit"
+)
+
+const (
+	VPNModeSystemProxy = "system_proxy"
+	VPNModeTunSplit    = "tun_split"
+	VPNModeTunGlobal   = "tun_global"
+)
+
+const (
+	VPNRelayModeDashboard = "dashboard"
+	VPNRelayModeDirect    = "direct"
+)
+
+const (
+	VPNRuleModeGlobal = "global"
+	VPNRuleModeDomain = "domain"
+	VPNRuleModeIP     = "ip"
+)
+
+const (
+	VPNStatePending  = "pending"
+	VPNStatePrepared = "prepared"
+	VPNStateStarting = "starting"
+	VPNStateRunning  = "running"
+	VPNStateStopped  = "stopped"
+	VPNStateFailed   = "failed"
+	VPNStateLost     = "lost"
+	VPNStateUnknown  = "unknown"
+)
+
+type VPNControlRequest struct {
+	SessionID       string            `json:"session_id"`
+	Action          string            `json:"action"`
+	Role            string            `json:"role"`
+	Mode            string            `json:"mode"`
+	RelayMode       string            `json:"relay_mode"`
+	PeerServerID    uint64            `json:"peer_server_id"`
+	RelayStreamID   string            `json:"relay_stream_id"`
+	Token           string            `json:"token"`
+	ExpiresAtUnix   int64             `json:"expires_at"`
+	ListenHTTP      string            `json:"listen_http,omitempty"`
+	ListenSOCKS     string            `json:"listen_socks,omitempty"`
+	TunName         string            `json:"tun_name,omitempty"`
+	DNSServer       string            `json:"dns_server,omitempty"`
+	Rules           VPNRules          `json:"rules"`
+	Limits          VPNLimits         `json:"limits"`
+	Core            VPNCoreSpec       `json:"core"`
+	DashboardBypass []string          `json:"dashboard_bypass"`
+	Extra           map[string]string `json:"extra,omitempty"`
+}
+
+type VPNRules struct {
+	Mode        string   `json:"mode"`
+	Domains     []string `json:"domains,omitempty"`
+	CIDRs       []string `json:"cidrs,omitempty"`
+	DirectCIDRs []string `json:"direct_cidrs,omitempty"`
+}
+
+type VPNLimits struct {
+	MaxUploadBytes     uint64 `json:"max_upload_bytes,omitempty"`
+	MaxDownloadBytes   uint64 `json:"max_download_bytes,omitempty"`
+	MaxConnections     uint32 `json:"max_connections,omitempty"`
+	IdleTimeoutSeconds uint32 `json:"idle_timeout_seconds,omitempty"`
+}
+
+type VPNCoreSpec struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	SHA256      string `json:"sha256"`
+	DownloadURL string `json:"download_url,omitempty"`
+}
+
+type VPNControlResult struct {
+	SessionID     string   `json:"session_id"`
+	Action        string   `json:"action"`
+	Role          string   `json:"role"`
+	State         string   `json:"state"`
+	CoreVersion   string   `json:"core_version,omitempty"`
+	LocalHTTP     string   `json:"local_http,omitempty"`
+	LocalSOCKS    string   `json:"local_socks,omitempty"`
+	TunName       string   `json:"tun_name,omitempty"`
+	UploadBytes   uint64   `json:"upload_bytes,omitempty"`
+	DownloadBytes uint64   `json:"download_bytes,omitempty"`
+	ActiveConns   uint32   `json:"active_conns,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+	Logs          []string `json:"logs,omitempty"`
+	StartedAtUnix int64    `json:"started_at,omitempty"`
+	StoppedAtUnix int64    `json:"stopped_at,omitempty"`
 }
 
 type ExecRequest struct {

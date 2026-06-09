@@ -1,0 +1,1097 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/nezhahq/agent/model"
+	pb "github.com/nezhahq/agent/proto"
+)
+
+type AgentVPNSession struct {
+	Request            model.VPNControlRequest
+	State              string
+	StartedAt          time.Time
+	cancel             context.CancelFunc
+	relay              vpnIOStream
+	sidecar            *AgentVPNSidecar
+	bridge             *AgentVPNBridge
+	ConfigPath         string
+	LogPath            string
+	StatePath          string
+	LastError          string
+	tunSnapshotPath    string
+	systemProxyApplied bool
+}
+
+type AgentVPNManager struct {
+	mu                 sync.Mutex
+	sessions           map[string]*AgentVPNSession
+	ioStreamFactory    func(context.Context) (vpnIOStream, error)
+	sidecarRunner      vpnSidecarRunner
+	httpClient         vpnHTTPClient
+	taskResultSender   func(*pb.TaskResult) error
+	systemProxyManager vpnSystemProxyManager
+	tunManager         vpnTunManager
+	tunHealthProbe     func(context.Context, model.VPNControlRequest) error
+	egressProbe        func(context.Context, model.VPNControlRequest) []string
+	sessionStateWriter func(string, agentVPNSessionState) error
+	staleSidecarKiller func(int) error
+	workDir            string
+	corePath           string
+	logPollInterval    time.Duration
+}
+
+var vpnManager = NewAgentVPNManager()
+
+func NewAgentVPNManager() *AgentVPNManager {
+	return &AgentVPNManager{
+		sessions:           make(map[string]*AgentVPNSession),
+		ioStreamFactory:    defaultVPNIOStreamFactory,
+		sidecarRunner:      defaultVPNSidecarRunner,
+		httpClient:         httpClient,
+		systemProxyManager: defaultVPNSystemProxyManager(),
+		tunManager:         defaultVPNTunManager(),
+		tunHealthProbe:     defaultVPNTunHealthProbe,
+		egressProbe:        defaultVPNEgressProbe,
+		sessionStateWriter: writeAgentVPNSessionState,
+		staleSidecarKiller: killStaleVPNSidecarProcess,
+		workDir:            defaultVPNWorkDir(),
+		corePath:           defaultVPNCorePath(),
+		logPollInterval:    2 * time.Second,
+	}
+}
+
+type vpnIOStream interface {
+	Send(*pb.IOStreamData) error
+	Recv() (*pb.IOStreamData, error)
+	CloseSend() error
+}
+
+type agentVPNSessionState struct {
+	Version            int       `json:"version"`
+	SessionID          string    `json:"session_id"`
+	Role               string    `json:"role"`
+	Mode               string    `json:"mode"`
+	State              string    `json:"state"`
+	ConfigPath         string    `json:"config_path,omitempty"`
+	LogPath            string    `json:"log_path,omitempty"`
+	TunName            string    `json:"tun_name,omitempty"`
+	DNSServer          string    `json:"dns_server,omitempty"`
+	SidecarPID         int       `json:"sidecar_pid,omitempty"`
+	SystemProxyApplied bool      `json:"system_proxy_applied,omitempty"`
+	TunSnapshotPath    string    `json:"tun_snapshot_path,omitempty"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at,omitempty"`
+}
+
+func defaultVPNIOStreamFactory(ctx context.Context) (vpnIOStream, error) {
+	if client == nil {
+		return nil, errors.New("dashboard client is not connected")
+	}
+	return client.IOStream(ctx)
+}
+
+func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	if err := validateVPNControlRequest(req); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := vpnDisabledByConfig(); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := vpnModeAllowedByConfig(req.Mode); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := m.preflightTun(req); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	cleanupLogs, err := m.stopExistingSessionBeforeStart(req.SessionID)
+	if err != nil {
+		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
+	}
+
+	now := time.Now()
+	sessionCtx, sessionCancel := context.WithCancel(context.Background())
+	session := &AgentVPNSession{
+		Request:   req,
+		State:     model.VPNStateRunning,
+		StartedAt: now,
+		cancel:    sessionCancel,
+	}
+	workDir := m.effectiveWorkDir()
+	session.StatePath = vpnSessionStatePath(workDir, req.SessionID)
+	if err := m.snapshotSessionTun(session); err != nil {
+		sessionCancel()
+		return vpnFailedResult(req, err), err
+	}
+	corePath, err := prepareVPNCore(context.Background(), req.Core, m.effectiveCorePath(req.Core), m.httpClient)
+	if err != nil {
+		m.restoreSessionTunForStartupFailure(session)
+		sessionCancel()
+		return vpnFailedResult(req, err), err
+	}
+	relay, err := m.attachDashboardRelay(req)
+	if err != nil {
+		m.restoreSessionTunForStartupFailure(session)
+		sessionCancel()
+		return vpnFailedResult(req, err), err
+	}
+	session.relay = relay
+	sidecar, err := startAgentVPNSidecar(context.Background(), req, workDir, corePath, m.sidecarRunner)
+	if err != nil {
+		_ = relay.CloseSend()
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
+		sessionCancel()
+		err = vpnSidecarStartError(req, err)
+		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
+	}
+	session.sidecar = sidecar
+	session.ConfigPath, session.LogPath = vpnSidecarMetadata(sidecar)
+	bridge, err := startAgentVPNBridge(context.Background(), req, relay)
+	if err != nil {
+		_ = sidecar.Stop()
+		_ = relay.CloseSend()
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
+		sessionCancel()
+		err = fmt.Errorf("start VPN bridge for session %s role %s: %w", req.SessionID, req.Role, err)
+		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
+	}
+	session.bridge = bridge
+	if err := m.probeSessionTunHealth(req); err != nil {
+		_ = bridge.Close()
+		_ = sidecar.Stop()
+		_ = relay.CloseSend()
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
+		sessionCancel()
+		err = fmt.Errorf("VPN TUN health probe failed for session %s: %w", req.SessionID, err)
+		return vpnFailedResultWithLogs(req, err, append(cleanupLogs, fmt.Sprintf("[tun-health] %s rollback=sidecar-stopped,relay-closed", err.Error()))), err
+	}
+	if shouldApplyVPNSystemProxy(req) {
+		if err := m.systemProxyManager.Apply(req.ListenHTTP, req.ListenSOCKS); err != nil {
+			_ = bridge.Close()
+			_ = sidecar.Stop()
+			_ = relay.CloseSend()
+			cleanupLogs := m.restoreSessionTunForStartupFailure(session)
+			sessionCancel()
+			err = fmt.Errorf("apply VPN system proxy for session %s: %w", req.SessionID, err)
+			cleanupLogs = append(cleanupLogs, "[cleanup] rollback=bridge-closed,sidecar-stopped,relay-closed")
+			return vpnFailedResultWithLogs(req, err, cleanupLogs), err
+		}
+		session.systemProxyApplied = true
+	}
+	if err := m.persistSessionState(session); err != nil {
+		cleanupLogs := make([]string, 0, 4)
+		systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
+		if systemProxyRestoreErr != nil {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
+		} else if shouldApplyVPNSystemProxy(req) {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
+		}
+		_ = bridge.Close()
+		_ = sidecar.Stop()
+		_ = relay.CloseSend()
+		tunRestoreErr := m.restoreSessionTun(session)
+		if tunRestoreErr != nil {
+			cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=failed: "+tunRestoreErr.Error())
+		} else if isVPNTunMode(req.Mode) {
+			cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=ok")
+		}
+		if systemProxyRestoreErr != nil || tunRestoreErr != nil {
+			m.persistSessionRecoveryState(session)
+		}
+		sessionCancel()
+		err = fmt.Errorf("persist VPN session state for session %s: %w", req.SessionID, err)
+		cleanupLogs = append(cleanupLogs, "[cleanup] rollback=bridge-closed,sidecar-stopped,relay-closed")
+		if systemProxyRestoreErr != nil || tunRestoreErr != nil {
+			if strings.TrimSpace(session.StatePath) != "" {
+				cleanupLogs = append(cleanupLogs, "[cleanup] state=kept-for-restore-retry path="+session.StatePath)
+			}
+		}
+		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
+	}
+	logs := m.probeSessionEgress(req)
+
+	m.mu.Lock()
+	m.sessions[req.SessionID] = session
+	m.mu.Unlock()
+	m.watchSidecar(req.SessionID, sidecar)
+	m.watchSidecarLogs(sessionCtx, req.SessionID, session.LogPath)
+
+	return model.VPNControlResult{
+		SessionID:     req.SessionID,
+		Action:        req.Action,
+		Role:          req.Role,
+		State:         model.VPNStateRunning,
+		LocalHTTP:     req.ListenHTTP,
+		LocalSOCKS:    req.ListenSOCKS,
+		TunName:       req.TunName,
+		Logs:          logs,
+		StartedAtUnix: now.Unix(),
+	}, nil
+}
+
+func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]string, error) {
+	m.mu.Lock()
+	_, exists := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !exists {
+		return nil, nil
+	}
+	logs, err := m.stopTrackedSession(model.VPNControlRequest{
+		SessionID: sessionID,
+		Action:    model.VPNActionStop,
+	}, true)
+	if err != nil {
+		printf("VPN existing session cleanup failed before start %s: %v", sessionID, err)
+		return logs, err
+	}
+	return logs, nil
+}
+
+func (m *AgentVPNManager) Stop(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	logs, err := m.stopTrackedSession(req, false)
+	if err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	return model.VPNControlResult{
+		SessionID:     req.SessionID,
+		Action:        req.Action,
+		Role:          req.Role,
+		State:         model.VPNStateStopped,
+		Logs:          logs,
+		StoppedAtUnix: time.Now().Unix(),
+	}, nil
+}
+
+func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOnTunRestore bool) ([]string, error) {
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nil, errors.New("session_id is required")
+	}
+	logs := make([]string, 0, 3)
+
+	m.mu.Lock()
+	session := m.sessions[req.SessionID]
+	delete(m.sessions, req.SessionID)
+	m.mu.Unlock()
+	if session != nil && session.cancel != nil {
+		session.cancel()
+	}
+	systemProxyWasApplied := session != nil && session.systemProxyApplied
+	systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
+	if systemProxyRestoreErr != nil {
+		logs = append(logs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
+	} else if systemProxyWasApplied {
+		logs = append(logs, "[cleanup] system_proxy_restore=ok")
+	}
+	if session != nil && session.relay != nil {
+		_ = session.relay.CloseSend()
+	}
+	if session != nil && session.bridge != nil {
+		_ = session.bridge.Close()
+	}
+	if session != nil && session.sidecar != nil {
+		_ = session.sidecar.Stop()
+	}
+	tunRestoreErr := m.restoreSessionTun(session)
+	if tunRestoreErr != nil {
+		printf("VPN TUN restore failed: %v", tunRestoreErr)
+		logs = append(logs, "[cleanup] tun_restore=failed: "+tunRestoreErr.Error())
+	} else if session != nil && strings.TrimSpace(session.tunSnapshotPath) != "" {
+		logs = append(logs, "[cleanup] tun_restore=ok")
+	}
+	statePath := ""
+	if session != nil {
+		statePath = session.StatePath
+	}
+	if statePath == "" {
+		statePath = vpnSessionStatePath(m.effectiveWorkDir(), req.SessionID)
+	}
+	if systemProxyRestoreErr == nil && tunRestoreErr == nil {
+		if err := removeAgentVPNSessionState(statePath); err != nil {
+			printf("VPN session state remove failed: %v", err)
+		}
+	} else {
+		printf("VPN session state kept for restore retry: %s", statePath)
+		logs = append(logs, "[cleanup] state=kept-for-restore-retry path="+statePath)
+		if failOnTunRestore {
+			if systemProxyRestoreErr != nil {
+				return logs, fmt.Errorf("restore VPN system proxy before replacement for session %s: %w", req.SessionID, systemProxyRestoreErr)
+			}
+			if tunRestoreErr != nil {
+				return logs, fmt.Errorf("restore VPN TUN state before replacement for session %s: %w", req.SessionID, tunRestoreErr)
+			}
+		}
+	}
+
+	return logs, nil
+}
+
+func (m *AgentVPNManager) StopAll(reason string) {
+	m.mu.Lock()
+	requests := make([]model.VPNControlRequest, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		if session == nil {
+			continue
+		}
+		req := session.Request
+		req.Action = model.VPNActionStop
+		requests = append(requests, req)
+	}
+	m.mu.Unlock()
+
+	for _, req := range requests {
+		if _, err := m.Stop(req); err != nil {
+			printf("VPN stop all failed for session %s (%s): %v", req.SessionID, reason, err)
+		}
+	}
+}
+
+func (m *AgentVPNManager) attachDashboardRelay(req model.VPNControlRequest) (vpnIOStream, error) {
+	if req.RelayMode != "" && req.RelayMode != model.VPNRelayModeDashboard {
+		return nil, fmt.Errorf("unsupported VPN relay mode %q", req.RelayMode)
+	}
+	stream, err := m.ioStreamFactory(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if err := stream.Send(&pb.IOStreamData{Data: append([]byte{0xff, 0x05, 0xff, 0x05}, []byte(req.RelayStreamID)...)}); err != nil {
+		_ = stream.CloseSend()
+		return nil, err
+	}
+	return stream, nil
+}
+
+func drainVPNRelayStream(stream vpnIOStream) {
+	defer stream.CloseSend()
+	for {
+		if _, err := stream.Recv(); err != nil {
+			if !errors.Is(err, io.EOF) {
+				printf("VPN relay stream closed: %v", err)
+			}
+			return
+		}
+	}
+}
+
+func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	if strings.TrimSpace(req.SessionID) == "" {
+		err := errors.New("session_id is required")
+		return vpnFailedResult(req, err), err
+	}
+
+	m.mu.Lock()
+	session := m.sessions[req.SessionID]
+	m.mu.Unlock()
+	if session == nil {
+		return model.VPNControlResult{
+			SessionID: req.SessionID,
+			Action:    req.Action,
+			Role:      req.Role,
+			State:     model.VPNStateStopped,
+		}, nil
+	}
+	payload := model.VPNControlResult{
+		SessionID:     req.SessionID,
+		Action:        req.Action,
+		Role:          req.Role,
+		State:         session.State,
+		LocalHTTP:     session.Request.ListenHTTP,
+		LocalSOCKS:    session.Request.ListenSOCKS,
+		TunName:       session.Request.TunName,
+		LastError:     session.LastError,
+		StartedAtUnix: session.StartedAt.Unix(),
+	}
+	payload.Logs = readVPNLogTail(session.LogPath, 200)
+	return payload, nil
+}
+
+func (m *AgentVPNManager) Get(sessionID string) (*AgentVPNSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session := m.sessions[sessionID]
+	if session == nil {
+		return nil, false
+	}
+	clone := *session
+	return &clone, true
+}
+
+func (m *AgentVPNManager) watchSidecar(sessionID string, sidecar *AgentVPNSidecar) {
+	if sidecar == nil {
+		return
+	}
+	go func() {
+		err := sidecar.Wait()
+		if err == nil {
+			return
+		}
+		m.markSessionFailed(sessionID, err)
+	}()
+}
+
+func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
+	if err == nil {
+		return
+	}
+	m.mu.Lock()
+	session := m.sessions[sessionID]
+	if session == nil {
+		m.mu.Unlock()
+		return
+	}
+	session.LastError = err.Error()
+	cancel := session.cancel
+	systemProxyApplied := session.systemProxyApplied
+	relay := session.relay
+	bridge := session.bridge
+	send := m.taskResultSender
+	m.mu.Unlock()
+	cleanupLogs := make([]string, 0, 3)
+
+	if cancel != nil {
+		cancel()
+	}
+	if systemProxyApplied {
+		if restoreErr := m.restoreSessionSystemProxy(session); restoreErr != nil {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+restoreErr.Error())
+		} else {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
+		}
+	}
+	if relay != nil {
+		_ = relay.CloseSend()
+	}
+	if bridge != nil {
+		_ = bridge.Close()
+	}
+	tunRestoreErr := m.restoreSessionTun(session)
+	if tunRestoreErr != nil {
+		printf("VPN TUN restore failed: %v", tunRestoreErr)
+		cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=failed: "+tunRestoreErr.Error())
+	} else if session != nil && strings.TrimSpace(session.tunSnapshotPath) != "" {
+		cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=ok")
+	}
+	if statePath := session.StatePath; statePath != "" {
+		if tunRestoreErr == nil {
+			if err := removeAgentVPNSessionState(statePath); err != nil {
+				printf("VPN session state remove failed: %v", err)
+			}
+		} else {
+			printf("VPN session state kept for restore retry: %s", statePath)
+			cleanupLogs = append(cleanupLogs, "[cleanup] state=kept-for-restore-retry path="+statePath)
+		}
+	}
+	m.mu.Lock()
+	session.State = model.VPNStateFailed
+	result := m.failedTaskResultLocked(session)
+	m.mu.Unlock()
+	if result != nil && len(cleanupLogs) > 0 {
+		var payload model.VPNControlResult
+		if err := json.Unmarshal([]byte(result.Data), &payload); err == nil {
+			payload.Logs = append(payload.Logs, cleanupLogs...)
+			if data, err := json.Marshal(payload); err == nil {
+				result.Data = string(data)
+			}
+		}
+	}
+	if send != nil && result != nil {
+		if sendErr := send(result); sendErr != nil {
+			printf("VPN failed result send failed: %v", sendErr)
+		}
+	}
+}
+
+func (m *AgentVPNManager) CleanupStaleSessions() {
+	states := loadAgentVPNSessionStates(m.effectiveWorkDir())
+	for _, state := range states {
+		if state.SystemProxyApplied && m.systemProxyManager != nil {
+			if err := m.systemProxyManager.Restore(); err != nil {
+				printf("VPN stale system proxy restore failed for session %s: %v", state.SessionID, err)
+				continue
+			}
+			state.SystemProxyApplied = false
+			if err := writeAgentVPNSessionState(vpnSessionStatePath(m.effectiveWorkDir(), state.SessionID), state); err != nil {
+				printf("VPN stale system proxy state update failed for session %s: %v", state.SessionID, err)
+				continue
+			}
+		}
+		if state.SidecarPID > 0 {
+			killer := m.staleSidecarKiller
+			if killer == nil {
+				killer = killStaleVPNSidecarProcess
+			}
+			if err := killer(state.SidecarPID); err != nil {
+				if isStaleSidecarAlreadyGone(err) {
+					printf("VPN stale sidecar already gone for session %s pid %d", state.SessionID, state.SidecarPID)
+				} else {
+					printf("VPN stale sidecar cleanup failed for session %s pid %d: %v", state.SessionID, state.SidecarPID, err)
+					continue
+				}
+			}
+			state.SidecarPID = 0
+			if err := writeAgentVPNSessionState(vpnSessionStatePath(m.effectiveWorkDir(), state.SessionID), state); err != nil {
+				printf("VPN stale sidecar state update failed for session %s: %v", state.SessionID, err)
+				continue
+			}
+		}
+		if isVPNTunMode(state.Mode) && strings.TrimSpace(state.TunSnapshotPath) != "" && m.tunManager != nil {
+			req := model.VPNControlRequest{
+				SessionID: state.SessionID,
+				Role:      state.Role,
+				Mode:      state.Mode,
+				TunName:   state.TunName,
+				DNSServer: state.DNSServer,
+			}
+			if err := m.tunManager.Restore(req, state.TunSnapshotPath); err != nil {
+				printf("VPN stale TUN restore failed for session %s: %v", state.SessionID, err)
+				continue
+			}
+		}
+		if err := removeAgentVPNSessionState(vpnSessionStatePath(m.effectiveWorkDir(), state.SessionID)); err != nil {
+			printf("VPN stale session state remove failed for session %s: %v", state.SessionID, err)
+		}
+	}
+}
+
+func isStaleSidecarAlreadyGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"process already finished",
+		"no such process",
+		"process not found",
+		"invalid process",
+		"cannot find the process",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *AgentVPNManager) persistSessionState(session *AgentVPNSession) error {
+	if session == nil {
+		return nil
+	}
+	path := session.StatePath
+	if path == "" {
+		path = vpnSessionStatePath(m.effectiveWorkDir(), session.Request.SessionID)
+		session.StatePath = path
+	}
+	state := agentVPNSessionState{
+		Version:            1,
+		SessionID:          session.Request.SessionID,
+		Role:               session.Request.Role,
+		Mode:               session.Request.Mode,
+		State:              session.State,
+		ConfigPath:         session.ConfigPath,
+		LogPath:            session.LogPath,
+		TunName:            session.Request.TunName,
+		DNSServer:          session.Request.DNSServer,
+		SidecarPID:         vpnSidecarPID(session.sidecar),
+		SystemProxyApplied: session.systemProxyApplied,
+		TunSnapshotPath:    session.tunSnapshotPath,
+		StartedAt:          session.StartedAt,
+		UpdatedAt:          time.Now(),
+	}
+	writer := m.sessionStateWriter
+	if writer == nil {
+		writer = writeAgentVPNSessionState
+	}
+	return writer(path, state)
+}
+
+func (m *AgentVPNManager) persistSessionRecoveryState(session *AgentVPNSession) {
+	if session == nil {
+		return
+	}
+	writer := m.sessionStateWriter
+	if writer == nil {
+		writer = writeAgentVPNSessionState
+	}
+	state := agentVPNSessionState{
+		Version:            1,
+		SessionID:          session.Request.SessionID,
+		Role:               session.Request.Role,
+		Mode:               session.Request.Mode,
+		State:              session.State,
+		ConfigPath:         session.ConfigPath,
+		LogPath:            session.LogPath,
+		TunName:            session.Request.TunName,
+		DNSServer:          session.Request.DNSServer,
+		SidecarPID:         vpnSidecarPID(session.sidecar),
+		SystemProxyApplied: session.systemProxyApplied,
+		TunSnapshotPath:    session.tunSnapshotPath,
+		StartedAt:          session.StartedAt,
+		UpdatedAt:          time.Now(),
+	}
+	if err := writer(session.StatePath, state); err != nil {
+		printf("VPN recovery session state write failed: %v", err)
+	}
+}
+
+func (m *AgentVPNManager) snapshotSessionTun(session *AgentVPNSession) error {
+	if session == nil || session.Request.Role != model.VPNRoleEntry || !isVPNTunMode(session.Request.Mode) {
+		return nil
+	}
+	if m.tunManager == nil {
+		return errors.New("VPN TUN manager is not available")
+	}
+	path, err := m.tunManager.Snapshot(session.Request, filepath.Dir(session.StatePath))
+	if err != nil {
+		return fmt.Errorf("snapshot VPN TUN state for session %s: %w", session.Request.SessionID, err)
+	}
+	session.tunSnapshotPath = path
+	return nil
+}
+
+func (m *AgentVPNManager) restoreSessionTun(session *AgentVPNSession) error {
+	if session == nil || session.Request.Role != model.VPNRoleEntry || !isVPNTunMode(session.Request.Mode) || strings.TrimSpace(session.tunSnapshotPath) == "" {
+		return nil
+	}
+	if m.tunManager == nil {
+		return errors.New("VPN TUN manager is not available")
+	}
+	if err := m.tunManager.Restore(session.Request, session.tunSnapshotPath); err != nil {
+		return err
+	}
+	session.tunSnapshotPath = ""
+	return nil
+}
+
+func (m *AgentVPNManager) restoreSessionTunForStartupFailure(session *AgentVPNSession) []string {
+	if session == nil {
+		return nil
+	}
+	hadSnapshot := strings.TrimSpace(session.tunSnapshotPath) != ""
+	if err := m.restoreSessionTun(session); err != nil {
+		m.persistSessionRecoveryState(session)
+		logs := []string{"[cleanup] tun_restore=failed: " + err.Error()}
+		if strings.TrimSpace(session.StatePath) != "" {
+			logs = append(logs, "[cleanup] state=kept-for-restore-retry path="+session.StatePath)
+		}
+		return logs
+	}
+	if hadSnapshot {
+		return []string{"[cleanup] tun_restore=ok"}
+	}
+	return nil
+}
+
+func (m *AgentVPNManager) preflightTun(req model.VPNControlRequest) error {
+	if req.Role != model.VPNRoleEntry || !isVPNTunMode(req.Mode) {
+		return nil
+	}
+	if m.tunManager == nil {
+		return errors.New("VPN TUN manager is not available")
+	}
+	if err := ensureVPNWintunAvailable(context.Background(), req, m.effectiveWorkDir(), m.httpClient); err != nil {
+		return fmt.Errorf("VPN Wintun preflight failed for session %s: %w", req.SessionID, err)
+	}
+	if err := m.tunManager.Preflight(req); err != nil {
+		return fmt.Errorf("VPN TUN preflight failed for session %s: %w", req.SessionID, err)
+	}
+	return nil
+}
+
+func (m *AgentVPNManager) restoreSessionSystemProxy(session *AgentVPNSession) error {
+	if session == nil || !session.systemProxyApplied || m.systemProxyManager == nil {
+		return nil
+	}
+	if err := m.systemProxyManager.Restore(); err != nil {
+		printf("VPN system proxy restore failed: %v", err)
+		return err
+	}
+	session.systemProxyApplied = false
+	return nil
+}
+
+func (m *AgentVPNManager) probeSessionTunHealth(req model.VPNControlRequest) error {
+	if req.Role != model.VPNRoleEntry || !isVPNTunMode(req.Mode) {
+		return nil
+	}
+	if m.tunHealthProbe == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), vpnTunHealthProbeTimeout(req))
+	defer cancel()
+	return m.tunHealthProbe(ctx, req)
+}
+
+func (m *AgentVPNManager) probeSessionEgress(req model.VPNControlRequest) []string {
+	if req.Role != model.VPNRoleEntry || strings.TrimSpace(req.Extra["egress_probe_url"]) == "" || m.egressProbe == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), vpnEgressProbeTimeout(req))
+	defer cancel()
+	return m.egressProbe(ctx, req)
+}
+
+func (m *AgentVPNManager) SetTaskResultSender(send func(*pb.TaskResult) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.taskResultSender = send
+}
+
+func (m *AgentVPNManager) failedTaskResultLocked(session *AgentVPNSession) *pb.TaskResult {
+	if session == nil {
+		return nil
+	}
+	payload := model.VPNControlResult{
+		SessionID: session.Request.SessionID,
+		Action:    model.VPNActionStatus,
+		Role:      session.Request.Role,
+		State:     model.VPNStateFailed,
+		LastError: session.LastError,
+		Logs:      readVPNLogTail(session.LogPath, 200),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return &pb.TaskResult{
+		Type:       model.TaskTypeVPNControl,
+		Successful: false,
+		Data:       string(data),
+	}
+}
+
+func (m *AgentVPNManager) watchSidecarLogs(ctx context.Context, sessionID string, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	interval := m.logPollInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var offset int64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				lines, nextOffset := readVPNLogLinesSince(path, offset)
+				offset = nextOffset
+				if len(lines) == 0 {
+					continue
+				}
+				m.sendSidecarLogLines(sessionID, lines)
+			}
+		}
+	}()
+}
+
+func (m *AgentVPNManager) sendSidecarLogLines(sessionID string, lines []string) {
+	m.mu.Lock()
+	session := m.sessions[sessionID]
+	send := m.taskResultSender
+	m.mu.Unlock()
+	if session == nil || send == nil || len(lines) == 0 {
+		return
+	}
+	payload := model.VPNControlResult{
+		SessionID: session.Request.SessionID,
+		Action:    model.VPNActionLogs,
+		Role:      session.Request.Role,
+		State:     session.State,
+		Logs:      lines,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	if err := send(&pb.TaskResult{
+		Type:       model.TaskTypeVPNControl,
+		Successful: true,
+		Data:       string(data),
+	}); err != nil {
+		printf("VPN log result send failed: %v", err)
+	}
+}
+
+func readVPNLogLinesSince(path string, offset int64) ([]string, int64) {
+	if strings.TrimSpace(path) == "" {
+		return nil, offset
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, offset
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, offset
+	}
+	size := stat.Size()
+	if offset > size {
+		offset = 0
+	}
+	if offset == size {
+		return nil, offset
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset
+	}
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return nil, offset
+	}
+	nextOffset := size
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	parts := strings.Split(text, "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	lines := make([]string, 0, len(parts))
+	for _, line := range parts {
+		if line = strings.TrimRight(line, "\r"); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nextOffset
+}
+
+func readVPNLogTail(path string, maxLines int) []string {
+	if strings.TrimSpace(path) == "" || maxLines <= 0 {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return lines
+}
+
+func vpnSessionStatePath(workDir string, sessionID string) string {
+	if strings.TrimSpace(workDir) == "" {
+		workDir = defaultVPNWorkDir()
+	}
+	return filepath.Join(workDir, "sessions", safeVPNPathName(sessionID), "state.json")
+}
+
+func writeAgentVPNSessionState(path string, state agentVPNSessionState) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("VPN session state path is required")
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0600)
+}
+
+func loadAgentVPNSessionStates(workDir string) []agentVPNSessionState {
+	pattern := filepath.Join(workDir, "sessions", "*", "state.json")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	states := make([]agentVPNSessionState, 0, len(matches))
+	for _, path := range matches {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			printf("VPN session state read failed for %s: %v", path, err)
+			continue
+		}
+		var state agentVPNSessionState
+		if err := json.Unmarshal(raw, &state); err != nil {
+			printf("VPN session state decode failed for %s: %v", path, err)
+			continue
+		}
+		if strings.TrimSpace(state.SessionID) == "" {
+			continue
+		}
+		states = append(states, state)
+	}
+	return states
+}
+
+func removeAgentVPNSessionState(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func handleVPNControlTask(task *pb.Task, result *pb.TaskResult) {
+	var req model.VPNControlRequest
+	if err := json.Unmarshal([]byte(task.GetData()), &req); err != nil {
+		result.Data = "invalid VPN control request: " + err.Error()
+		return
+	}
+	if err := validateVPNControlRequest(req); err != nil {
+		payload := vpnFailedResult(req, err)
+		data, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			result.Data = marshalErr.Error()
+			return
+		}
+		result.Data = string(data)
+		result.Successful = false
+		return
+	}
+
+	var payload model.VPNControlResult
+	var err error
+	switch req.Action {
+	case model.VPNActionStart, model.VPNActionPrepare:
+		payload, err = vpnManager.Start(req)
+	case model.VPNActionStop, model.VPNActionCleanup:
+		payload, err = vpnManager.Stop(req)
+	case model.VPNActionStatus, model.VPNActionLogs:
+		payload, err = vpnManager.Status(req)
+	case model.VPNActionRestart:
+		payload, err = vpnManager.Start(req)
+	default:
+		err = fmt.Errorf("unsupported VPN action %q", req.Action)
+		payload = vpnFailedResult(req, err)
+	}
+
+	data, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		result.Data = marshalErr.Error()
+		return
+	}
+	result.Data = string(data)
+	result.Successful = err == nil
+}
+
+func validateVPNControlRequest(req model.VPNControlRequest) error {
+	if strings.TrimSpace(req.SessionID) == "" {
+		return errors.New("session_id is required")
+	}
+	if req.Role != model.VPNRoleEntry && req.Role != model.VPNRoleExit {
+		return fmt.Errorf("unsupported VPN role %q", req.Role)
+	}
+	if strings.TrimSpace(req.RelayMode) == "" {
+		return errors.New("relay_mode is required")
+	}
+	if req.RelayMode != model.VPNRelayModeDashboard {
+		return fmt.Errorf("unsupported VPN relay mode %q", req.RelayMode)
+	}
+	if !vpnControlActionKnown(req.Action) {
+		return fmt.Errorf("unsupported VPN action %q", req.Action)
+	}
+	if vpnControlActionStartsRuntime(req.Action) {
+		if strings.TrimSpace(req.RelayStreamID) == "" {
+			return errors.New("relay_stream_id is required")
+		}
+		if strings.TrimSpace(req.Token) == "" {
+			return errors.New("token is required")
+		}
+		if err := validateVPNCoreSpec(req.Core); err != nil {
+			return err
+		}
+		if err := validateVPNWintunSpec(req); err != nil {
+			return err
+		}
+		if err := validateVPNTunHealthURL(req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func vpnControlActionKnown(action string) bool {
+	switch action {
+	case model.VPNActionPrepare,
+		model.VPNActionStart,
+		model.VPNActionStop,
+		model.VPNActionRestart,
+		model.VPNActionStatus,
+		model.VPNActionLogs,
+		model.VPNActionCleanup:
+		return true
+	default:
+		return false
+	}
+}
+
+func vpnControlActionStartsRuntime(action string) bool {
+	return action == model.VPNActionStart || action == model.VPNActionRestart || action == model.VPNActionPrepare
+}
+
+func (m *AgentVPNManager) effectiveWorkDir() string {
+	if strings.TrimSpace(agentConfig.VPNStateDir) != "" {
+		return strings.TrimSpace(agentConfig.VPNStateDir)
+	}
+	if strings.TrimSpace(m.workDir) != "" {
+		return m.workDir
+	}
+	return defaultVPNWorkDir()
+}
+
+func (m *AgentVPNManager) effectiveCorePath(spec model.VPNCoreSpec) string {
+	if path := resolveVPNCorePath("", spec); path != "" {
+		return path
+	}
+	if strings.TrimSpace(agentConfig.VPNCoreDir) != "" {
+		name := "sing-box"
+		if strings.TrimSpace(spec.Name) != "" {
+			name = strings.TrimSpace(spec.Name)
+		}
+		if !strings.HasSuffix(strings.ToLower(name), ".exe") && isWindowsRuntime() {
+			name += ".exe"
+		}
+		return filepath.Join(strings.TrimSpace(agentConfig.VPNCoreDir), name)
+	}
+	if strings.TrimSpace(m.corePath) != "" {
+		return resolveVPNCorePath(m.corePath, spec)
+	}
+	return resolveVPNCorePath(defaultVPNCorePath(), spec)
+}
+
+func vpnFailedResult(req model.VPNControlRequest, err error) model.VPNControlResult {
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	return model.VPNControlResult{
+		SessionID: req.SessionID,
+		Action:    req.Action,
+		Role:      req.Role,
+		State:     model.VPNStateFailed,
+		LastError: message,
+	}
+}
+
+func vpnFailedResultWithLogs(req model.VPNControlRequest, err error, logs []string) model.VPNControlResult {
+	result := vpnFailedResult(req, err)
+	if len(logs) > 0 {
+		result.Logs = append(result.Logs, logs...)
+	}
+	return result
+}

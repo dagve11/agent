@@ -60,32 +60,42 @@ func (s *HostState) PB() *pb.State {
 }
 
 type Host struct {
-	Platform        string
-	PlatformVersion string
-	CPU             []string
-	MemTotal        uint64
-	DiskTotal       uint64
-	SwapTotal       uint64
-	Arch            string
-	Virtualization  string
-	BootTime        uint64
-	Version         string
-	GPU             []string
+	Platform            string
+	PlatformVersion     string
+	CPU                 []string
+	MemTotal            uint64
+	DiskTotal           uint64
+	SwapTotal           uint64
+	Arch                string
+	Virtualization      string
+	BootTime            uint64
+	Version             string
+	GPU                 []string
+	VPNEnabled          bool
+	VPNAllowSystemProxy bool
+	VPNAllowTun         bool
+	VPNCoreVersion      string
+	VPNLastError        string
 }
 
 func (h *Host) PB() *pb.Host {
 	return &pb.Host{
-		Platform:        h.Platform,
-		PlatformVersion: h.PlatformVersion,
-		Cpu:             h.CPU,
-		MemTotal:        h.MemTotal,
-		DiskTotal:       h.DiskTotal,
-		SwapTotal:       h.SwapTotal,
-		Arch:            h.Arch,
-		Virtualization:  h.Virtualization,
-		BootTime:        h.BootTime,
-		Version:         h.Version,
-		Gpu:             h.GPU,
+		Platform:            h.Platform,
+		PlatformVersion:     h.PlatformVersion,
+		Cpu:                 h.CPU,
+		MemTotal:            h.MemTotal,
+		DiskTotal:           h.DiskTotal,
+		SwapTotal:           h.SwapTotal,
+		Arch:                h.Arch,
+		Virtualization:      h.Virtualization,
+		BootTime:            h.BootTime,
+		Version:             h.Version,
+		Gpu:                 h.GPU,
+		VpnEnabled:          h.VPNEnabled,
+		VpnAllowSystemProxy: h.VPNAllowSystemProxy,
+		VpnAllowTun:         h.VPNAllowTun,
+		VpnCoreVersion:      h.VPNCoreVersion,
+		VpnLastError:        h.VPNLastError,
 	}
 }
 
