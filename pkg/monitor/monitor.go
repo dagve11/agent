@@ -73,6 +73,7 @@ func InitConfig(cfg *model.AgentConfig) {
 // GetHost 获取主机硬件信息
 func GetHost() *model.Host {
 	var ret model.Host
+	cfg := agentConfig
 
 	var cpuType string
 	hi, err := host.Info()
@@ -96,7 +97,7 @@ func GetHost() *model.Host {
 	ctxCpu := context.WithValue(context.Background(), cpu.CPUHostKey, cpuType)
 	ret.CPU = tryHost(ctxCpu, CPU, cpu.GetHost)
 
-	if agentConfig.GPU {
+	if cfg != nil && cfg.GPU {
 		ret.GPU = tryHost(context.Background(), GPU, gpu.GetHost)
 	}
 
@@ -122,6 +123,12 @@ func GetHost() *model.Host {
 	}
 
 	ret.Version = Version
+	if cfg != nil && !cfg.DisableVPN {
+		ret.VPNEnabled = true
+		ret.VPNAllowSystemProxy = cfg.VPNAllowSystemProxy
+		ret.VPNAllowTun = cfg.VPNAllowTun
+		ret.VPNCoreVersion = Version
+	}
 
 	return &ret
 }

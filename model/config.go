@@ -40,6 +40,11 @@ type AgentConfig struct {
 	UseGiteeToUpgrade           bool            `koanf:"use_gitee_to_upgrade" json:"use_gitee_to_upgrade"`       // 强制从Gitee获取更新
 	UseAtomGitToUpgrade         bool            `koanf:"use_atomgit_to_upgrade" json:"use_atomgit_to_upgrade"`   // 强制从AtomGit获取更新
 	DisableNat                  bool            `koanf:"disable_nat" json:"disable_nat"`                         // 关闭内网穿透
+	DisableVPN                  bool            `koanf:"disable_vpn" json:"disable_vpn"`                         // 关闭 Agent VPN
+	VPNAllowSystemProxy         bool            `koanf:"vpn_allow_system_proxy" json:"vpn_allow_system_proxy"`   // 允许 Agent VPN 系统代理模式
+	VPNAllowTun                 bool            `koanf:"vpn_allow_tun" json:"vpn_allow_tun"`                     // 允许 Agent VPN TUN 模式
+	VPNStateDir                 string          `koanf:"vpn_state_dir" json:"vpn_state_dir,omitempty"`           // Agent VPN 状态目录
+	VPNCoreDir                  string          `koanf:"vpn_core_dir" json:"vpn_core_dir,omitempty"`             // Agent VPN 核心程序目录
 	DisableSendQuery            bool            `koanf:"disable_send_query" json:"disable_send_query"`           // 关闭发送TCP/ICMP/HTTP请求
 	IPReportPeriod              uint32          `koanf:"ip_report_period" json:"ip_report_period"`               // IP上报周期
 	SelfUpdatePeriod            uint32          `koanf:"self_update_period" json:"self_update_period"`           // 自动更新周期
@@ -123,6 +128,9 @@ func ValidateConfig(c *AgentConfig, isRemoteEdit bool) error {
 		c.IPReportPeriod = 1800
 	} else if c.IPReportPeriod < 30 {
 		c.IPReportPeriod = 30
+	}
+	if !c.DisableVPN && !c.VPNAllowSystemProxy && !c.VPNAllowTun {
+		c.VPNAllowSystemProxy = true
 	}
 
 	if c.ReportDelay < 1 || c.ReportDelay > 4 {

@@ -494,6 +494,8 @@ func receiveTasksDaemon(tasks pb.NezhaService_RequestTaskClient, cancel context.
 	var task *pb.Task
 	var err error
 	send := newSerialTaskResultSender(tasks.Send)
+	vpnManager.SetTaskResultSender(send)
+	defer vpnManager.SetTaskResultSender(nil)
 	for {
 		task, err = doWithTimeout(func() (*pb.Task, error) {
 			return tasks.Recv()
