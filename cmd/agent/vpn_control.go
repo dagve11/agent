@@ -159,7 +159,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	session.relay = relay
 	sidecar, err := startAgentVPNSidecar(context.Background(), req, workDir, corePath, m.sidecarRunner)
 	if err != nil {
-		_ = relay.CloseSend()
+		go drainVPNRelayStream(relay)
 		cleanupLogs := m.cleanupSessionCore(session)
 		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
 		sessionCancel()
@@ -171,7 +171,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	bridge, err := startAgentVPNBridge(context.Background(), req, relay)
 	if err != nil {
 		_ = sidecar.Stop()
-		_ = relay.CloseSend()
+		go drainVPNRelayStream(relay)
 		cleanupLogs := m.cleanupSessionCore(session)
 		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
 		sessionCancel()
@@ -437,7 +437,10 @@ func (m *AgentVPNManager) attachDashboardRelay(req model.VPNControlRequest) (vpn
 }
 
 func drainVPNRelayStream(stream vpnIOStream) {
-	defer stream.CloseSend()
+	if stream == nil {
+		return
+	}
+	_ = stream.CloseSend()
 	for {
 		if _, err := stream.Recv(); err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -561,6 +564,9 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 	m.mu.Lock()
 	session.State = model.VPNStateFailed
 	result := m.failedTaskResultLocked(session)
+	if current := m.sessions[sessionID]; current == session {
+		delete(m.sessions, sessionID)
+	}
 	m.mu.Unlock()
 	if result != nil && len(cleanupLogs) > 0 {
 		var payload model.VPNControlResult

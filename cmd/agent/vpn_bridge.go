@@ -420,6 +420,8 @@ func (m *vpnMuxBridge) copyConnToMux(id uint64, conn net.Conn) {
 		if err != nil {
 			if _, ok := m.removeConn(id); ok {
 				_ = conn.Close()
+			}
+			if m.ctx.Err() == nil {
 				_ = m.sendFrame(vpnMuxFrameTypeClose, id, nil)
 			}
 			return
