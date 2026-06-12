@@ -90,6 +90,134 @@ func TestPrepareVPNCoreDownloadsMissingCoreAndVerifiesSHA256(t *testing.T) {
 	}
 }
 
+func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnStop(t *testing.T) {
+	originalConfig := agentConfig
+	t.Cleanup(func() { agentConfig = originalConfig })
+	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
+
+	content := []byte("downloaded-temp-core")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(server.Close)
+
+	manager := NewAgentVPNManager()
+	manager.workDir = t.TempDir()
+	manager.corePath = ""
+	manager.httpClient = server.Client()
+	manager.ioStreamFactory = func(context.Context) (vpnIOStream, error) {
+		return &recordingVPNIOStream{}, nil
+	}
+	process := newBlockingRecordingVPNSidecarProcess()
+	var started vpnSidecarStartSpec
+	manager.sidecarRunner = func(ctx context.Context, spec vpnSidecarStartSpec) (vpnSidecarProcess, error) {
+		started = spec
+		return process, nil
+	}
+
+	req := model.VPNControlRequest{
+		SessionID:     "vpn-session-temp-core-download",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleExit,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-exit-stream-temp-core-download",
+		Token:         "session-token",
+		Core: model.VPNCoreSpec{
+			Name:        "sing-box",
+			SHA256:      sha256HexForTest(content),
+			DownloadURL: server.URL + "/sing-box",
+		},
+	}
+	req = withTestVPNBridgeAddress(t, req)
+	t.Cleanup(func() { _ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID)) })
+	_ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID))
+
+	payload, err := manager.Start(req)
+	if err != nil {
+		t.Fatalf("start VPN with downloaded temp core: %v", err)
+	}
+	if payload.State != model.VPNStateRunning {
+		t.Fatalf("unexpected start payload: %#v", payload)
+	}
+	session, ok := manager.Get(req.SessionID)
+	if !ok {
+		t.Fatal("running session must be tracked")
+	}
+	if !session.coreTemporary || session.CoreCleanupDir == "" {
+		t.Fatalf("default core must be marked temporary: %#v", session)
+	}
+	if started.CorePath != session.CorePath {
+		t.Fatalf("sidecar core path must match session core path: started=%q session=%q", started.CorePath, session.CorePath)
+	}
+	if _, err := os.Stat(started.CorePath); err != nil {
+		t.Fatalf("downloaded temporary core must exist before stop: %v", err)
+	}
+
+	stopReq := req
+	stopReq.Action = model.VPNActionStop
+	if _, err := manager.Stop(stopReq); err != nil {
+		t.Fatalf("stop VPN: %v", err)
+	}
+	if _, err := os.Stat(session.CoreCleanupDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary core directory must be removed on stop, stat err=%v", err)
+	}
+}
+
+func TestAgentVPNKeepsExplicitCorePathOnStop(t *testing.T) {
+	originalConfig := agentConfig
+	t.Cleanup(func() { agentConfig = originalConfig })
+	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
+
+	manager := NewAgentVPNManager()
+	manager.workDir = t.TempDir()
+	manager.corePath = filepath.Join(t.TempDir(), "core", "sing-box")
+	if err := os.MkdirAll(filepath.Dir(manager.corePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.corePath, []byte("persistent-core"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager.ioStreamFactory = func(context.Context) (vpnIOStream, error) {
+		return &recordingVPNIOStream{}, nil
+	}
+	process := newBlockingRecordingVPNSidecarProcess()
+	manager.sidecarRunner = func(context.Context, vpnSidecarStartSpec) (vpnSidecarProcess, error) {
+		return process, nil
+	}
+
+	req := model.VPNControlRequest{
+		SessionID:     "vpn-session-persistent-core",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleExit,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-exit-stream-persistent-core",
+		Token:         "session-token",
+	}
+	req = withTestVPNBridgeAddress(t, req)
+
+	if _, err := manager.Start(req); err != nil {
+		t.Fatalf("start VPN with explicit core: %v", err)
+	}
+	session, ok := manager.Get(req.SessionID)
+	if !ok {
+		t.Fatal("running session must be tracked")
+	}
+	if session.coreTemporary {
+		t.Fatalf("explicit core path must not be marked temporary: %#v", session)
+	}
+
+	stopReq := req
+	stopReq.Action = model.VPNActionStop
+	if _, err := manager.Stop(stopReq); err != nil {
+		t.Fatalf("stop VPN: %v", err)
+	}
+	if _, err := os.Stat(manager.corePath); err != nil {
+		t.Fatalf("explicit core path must remain after stop: %v", err)
+	}
+}
+
 func TestPrepareVPNCoreDownloadsPlatformCoreFromBaseURLManifestAndRedirect(t *testing.T) {
 	content := []byte("downloaded-platform-core")
 	assetName := vpnCoreAssetName(runtime.GOOS, runtime.GOARCH)
