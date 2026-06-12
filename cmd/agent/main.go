@@ -375,6 +375,9 @@ func run(stop <-chan struct{}) {
 		prevDashboardBootTime = dashboardBootTimeReceipt.GetData()
 		initialized = true
 
+		// 清理启动前残留的 VPN 会话（Agent 崩溃后的孤儿进程）
+		vpnManager.CleanupStaleSessions()
+
 		wCtx, wCancel := context.WithCancel(context.Background())
 
 		// 执行 Task
@@ -406,6 +409,8 @@ func run(stop <-chan struct{}) {
 			wCancel()
 		case <-stop:
 			println("Service stop requested")
+			// 优雅停止所有 VPN 会话
+			vpnManager.StopAll("service stop")
 			wCancel()
 			return
 		case <-wCtx.Done():
@@ -588,6 +593,8 @@ func doTask(task *pb.Task) *pb.TaskResult {
 		return nil
 	case model.TaskTypeDestroyAgent:
 		handleDestroyAgentTask(&result)
+	case model.TaskTypeVPNControl:
+		handleVPNControlTask(task, &result)
 	case model.TaskTypeKeepalive:
 	default:
 		printf("不支持的任务: %v", task)
