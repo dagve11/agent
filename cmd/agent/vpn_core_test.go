@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -89,6 +90,49 @@ func TestPrepareVPNCoreDownloadsMissingCoreAndVerifiesSHA256(t *testing.T) {
 	}
 }
 
+func TestPrepareVPNCoreDownloadsPlatformCoreFromBaseURLManifestAndRedirect(t *testing.T) {
+	content := []byte("downloaded-platform-core")
+	assetName := vpnCoreAssetName(runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write([]byte(`{"assets":[{"asset":"` + assetName + `","sha256":"` + sha256HexForTest(content) + `"}]}`))
+		case "/" + assetName:
+			http.Redirect(w, r, "/download/"+assetName, http.StatusFound)
+		case "/download/" + assetName:
+			_, _ = w.Write(content)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := server.Client()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	workDir := t.TempDir()
+	corePath := filepath.Join(workDir, "core", "sing-box")
+	resolved, err := prepareVPNCore(context.Background(), model.VPNCoreSpec{
+		Name:            "sing-box",
+		DownloadBaseURL: server.URL,
+	}, corePath, client)
+	if err != nil {
+		t.Fatalf("prepare downloaded platform core: %v", err)
+	}
+	if resolved != corePath {
+		t.Fatalf("downloaded core path mismatch: want %q got %q", corePath, resolved)
+	}
+	got, err := os.ReadFile(corePath)
+	if err != nil {
+		t.Fatalf("downloaded core must be written: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("downloaded core content mismatch: %q", got)
+	}
+}
+
 func TestPrepareVPNCoreRejectsInvalidSpecBeforeDownload(t *testing.T) {
 	workDir := t.TempDir()
 	corePath := filepath.Join(workDir, "core", "sing-box")
@@ -122,6 +166,14 @@ func TestPrepareVPNCoreRejectsInvalidSpecBeforeDownload(t *testing.T) {
 				SHA256:      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			},
 			wantErr: "core sha256 must be a 64-character hex digest without prefix",
+		},
+		{
+			name: "non HTTP base URL",
+			spec: model.VPNCoreSpec{
+				Name:            "sing-box",
+				DownloadBaseURL: "file:///tmp/sing-box",
+			},
+			wantErr: "core download base url must use http or https",
 		},
 	}
 	for _, tc := range cases {
