@@ -29,8 +29,10 @@ import (
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/urfave/cli/v2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/resolver"
 
 	"github.com/nezhahq/agent/cmd/agent/commands"
@@ -345,7 +347,27 @@ func run(stop <-chan struct{}) {
 		} else {
 			securityOption = grpc.WithTransportCredentials(insecure.NewCredentials())
 		}
-		conn, err = grpc.NewClient(agentConfig.Server, securityOption, grpc.WithPerRPCCredentials(&auth))
+		conn, err = grpc.NewClient(
+			agentConfig.Server,
+			securityOption,
+			grpc.WithPerRPCCredentials(&auth),
+			// gRPC Keepalive 配置：每 10 秒发送 ping，3 秒无响应则断开
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                10 * time.Second, // 每 10 秒发送 keepalive ping
+				Timeout:             3 * time.Second,  // 3 秒无响应视为连接死亡
+				PermitWithoutStream: true,             // 即使没有活跃 RPC 也发送 keepalive
+			}),
+			// 智能重连配置：指数退避 + 随机抖动
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff: backoff.Config{
+					BaseDelay:  1.0 * time.Second, // 第一次重连延迟 1 秒
+					Multiplier: 1.6,               // 每次失败延迟乘以 1.6
+					Jitter:     0.2,               // 20% 随机抖动，避免多 agent 同时重连
+					MaxDelay:   30 * time.Second,  // 最大延迟 30 秒
+				},
+				MinConnectTimeout: 5 * time.Second, // 单次连接尝试超时
+			}),
+		)
 		if err != nil {
 			printf("与面板建立连接失败: %v", err)
 			retry()
@@ -1243,7 +1265,7 @@ func handleTerminalTask(task *pb.Task) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go serializedKeepAlive(ctx, sender, 30*time.Second)
+	go serializedKeepAlive(ctx, sender, 10*time.Second) // 从 30 秒改为 10 秒
 
 	defer func() {
 		err := tty.Close()
@@ -1299,6 +1321,7 @@ func handleNATTask(task *pb.Task) {
 		printf("NAT IOStream失败: %v", err)
 		return
 	}
+	remoteIO = newSerializedIOStreamClient(remoteIO)
 
 	// 发送 StreamID
 	if err := remoteIO.Send(&pb.IOStreamData{Data: append([]byte{
@@ -1396,6 +1419,7 @@ func handleFMTask(task *pb.Task) {
 		printf("FM IOStream失败: %v", err)
 		return
 	}
+	remoteIO = newSerializedIOStreamClient(remoteIO)
 
 	// 发送 StreamID
 	if err := remoteIO.Send(&pb.IOStreamData{Data: append([]byte{
@@ -1444,20 +1468,37 @@ func lookupIP(hostOrIp string) (string, error) {
 }
 
 func ioStreamKeepAlive(ctx context.Context, stream pb.NezhaService_IOStreamClient) {
-	ticker := time.Tick(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second) // 从 30 秒改为 10 秒，更快检测断开
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			printf("IOStream KeepAlive stopped: %v", ctx.Err())
 			return
-		case <-ticker:
+		case <-ticker.C:
 			if err := stream.Send(&pb.IOStreamData{Data: []byte{}}); err != nil {
 				printf("IOStream KeepAlive failed: %v", err)
 				return
 			}
 		}
 	}
+}
+
+type serializedIOStreamClient struct {
+	pb.NezhaService_IOStreamClient
+	sender *serialIOStreamSender
+}
+
+func newSerializedIOStreamClient(stream pb.NezhaService_IOStreamClient) pb.NezhaService_IOStreamClient {
+	return &serializedIOStreamClient{
+		NezhaService_IOStreamClient: stream,
+		sender:                      newSerialIOStreamSender(stream),
+	}
+}
+
+func (s *serializedIOStreamClient) Send(data *pb.IOStreamData) error {
+	return s.sender.Send(data)
 }
 
 func doWithTimeout[T any](fn func() (T, error), timeout time.Duration) (T, error) {
