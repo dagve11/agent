@@ -255,6 +255,47 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	}, nil
 }
 
+func (m *AgentVPNManager) Prepare(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	if err := validateVPNControlRequest(req); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := vpnDisabledByConfig(); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := vpnModeAllowedByConfig(req.Mode); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+
+	coreTarget := m.effectiveCoreTarget(req)
+	_, statErr := os.Stat(coreTarget.Path)
+	corePath, err := prepareVPNCore(context.Background(), req.Core, coreTarget.Path, m.httpClient)
+	if err != nil {
+		cleanupSession := &AgentVPNSession{
+			CoreCleanupDir: coreTarget.CleanupDir,
+			coreTemporary:  coreTarget.Temporary,
+		}
+		logs := append([]string{"[core] prepare=failed error=" + err.Error()}, m.cleanupSessionCore(cleanupSession)...)
+		return vpnFailedResultWithLogs(req, err, logs), err
+	}
+
+	status := "reused"
+	if errors.Is(statErr, os.ErrNotExist) {
+		status = "downloaded"
+	} else if statErr != nil {
+		status = "ready"
+	}
+	return model.VPNControlResult{
+		SessionID:   req.SessionID,
+		Action:      req.Action,
+		Role:        req.Role,
+		State:       model.VPNStatePrepared,
+		CoreVersion: req.Core.Version,
+		Logs: []string{
+			fmt.Sprintf("[core] prepare=%s path=%s temporary=%t", status, corePath, coreTarget.Temporary),
+		},
+	}, nil
+}
+
 func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]string, error) {
 	m.mu.Lock()
 	_, exists := m.sessions[sessionID]
@@ -317,7 +358,15 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 	if session != nil && session.sidecar != nil {
 		_ = session.sidecar.Stop()
 	}
-	logs = append(logs, m.cleanupSessionCore(session)...)
+	if session != nil {
+		logs = append(logs, m.cleanupSessionCore(session)...)
+	} else {
+		coreTarget := m.effectiveCoreTarget(req)
+		logs = append(logs, m.cleanupSessionCore(&AgentVPNSession{
+			CoreCleanupDir: coreTarget.CleanupDir,
+			coreTemporary:  coreTarget.Temporary,
+		})...)
+	}
 	tunRestoreErr := m.restoreSessionTun(session)
 	if tunRestoreErr != nil {
 		printf("VPN TUN restore failed: %v", tunRestoreErr)
@@ -995,7 +1044,9 @@ func handleVPNControlTask(task *pb.Task, result *pb.TaskResult) {
 	var payload model.VPNControlResult
 	var err error
 	switch req.Action {
-	case model.VPNActionStart, model.VPNActionPrepare:
+	case model.VPNActionPrepare:
+		payload, err = vpnManager.Prepare(req)
+	case model.VPNActionStart:
 		payload, err = vpnManager.Start(req)
 	case model.VPNActionStop, model.VPNActionCleanup:
 		payload, err = vpnManager.Stop(req)
@@ -1033,15 +1084,17 @@ func validateVPNControlRequest(req model.VPNControlRequest) error {
 	if !vpnControlActionKnown(req.Action) {
 		return fmt.Errorf("unsupported VPN action %q", req.Action)
 	}
+	if vpnControlActionPreparesCore(req.Action) {
+		if err := validateVPNCoreSpec(req.Core); err != nil {
+			return err
+		}
+	}
 	if vpnControlActionStartsRuntime(req.Action) {
 		if strings.TrimSpace(req.RelayStreamID) == "" {
 			return errors.New("relay_stream_id is required")
 		}
 		if strings.TrimSpace(req.Token) == "" {
 			return errors.New("token is required")
-		}
-		if err := validateVPNCoreSpec(req.Core); err != nil {
-			return err
 		}
 		if err := validateVPNWintunSpec(req); err != nil {
 			return err
@@ -1069,7 +1122,11 @@ func vpnControlActionKnown(action string) bool {
 }
 
 func vpnControlActionStartsRuntime(action string) bool {
-	return action == model.VPNActionStart || action == model.VPNActionRestart || action == model.VPNActionPrepare
+	return action == model.VPNActionStart || action == model.VPNActionRestart
+}
+
+func vpnControlActionPreparesCore(action string) bool {
+	return action == model.VPNActionPrepare || vpnControlActionStartsRuntime(action)
 }
 
 func (m *AgentVPNManager) effectiveWorkDir() string {

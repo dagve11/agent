@@ -164,6 +164,117 @@ func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnStop(t *testing.T
 	}
 }
 
+func TestAgentVPNPrepareDownloadsCoreWithoutStartingSidecar(t *testing.T) {
+	originalConfig := agentConfig
+	t.Cleanup(func() { agentConfig = originalConfig })
+	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
+
+	content := []byte("prepared-temp-core")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(server.Close)
+
+	manager := NewAgentVPNManager()
+	manager.corePath = ""
+	manager.httpClient = server.Client()
+	sidecarStarted := false
+	manager.sidecarRunner = func(context.Context, vpnSidecarStartSpec) (vpnSidecarProcess, error) {
+		sidecarStarted = true
+		return newBlockingRecordingVPNSidecarProcess(), nil
+	}
+
+	req := model.VPNControlRequest{
+		SessionID: "vpn-session-prepare-core",
+		Action:    model.VPNActionPrepare,
+		Role:      model.VPNRoleExit,
+		Mode:      model.VPNModeSystemProxy,
+		RelayMode: model.VPNRelayModeDashboard,
+		Core: model.VPNCoreSpec{
+			Name:        "sing-box",
+			SHA256:      sha256HexForTest(content),
+			DownloadURL: server.URL + "/sing-box",
+		},
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID)) })
+	_ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID))
+
+	payload, err := manager.Prepare(req)
+	if err != nil {
+		t.Fatalf("prepare VPN core: %v", err)
+	}
+	if payload.State != model.VPNStatePrepared {
+		t.Fatalf("prepare must report prepared state, got %#v", payload)
+	}
+	if sidecarStarted {
+		t.Fatal("prepare must not start the VPN sidecar")
+	}
+	if _, ok := manager.Get(req.SessionID); ok {
+		t.Fatal("prepare must not create a running local session")
+	}
+	corePath := filepath.Join(defaultVPNSessionCoreCleanupDir(req.SessionID), "core", vpnCoreFileName(req.Core))
+	if _, err := os.Stat(corePath); err != nil {
+		t.Fatalf("prepared temporary core must exist: %v", err)
+	}
+	if !strings.Contains(strings.Join(payload.Logs, "\n"), "[core] prepare=downloaded") {
+		t.Fatalf("prepare logs must report core download status, got %#v", payload.Logs)
+	}
+}
+
+func TestAgentVPNStopRemovesPreparedTemporaryCore(t *testing.T) {
+	originalConfig := agentConfig
+	t.Cleanup(func() { agentConfig = originalConfig })
+	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
+
+	content := []byte("prepared-core-for-stop")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(server.Close)
+
+	manager := NewAgentVPNManager()
+	manager.corePath = ""
+	manager.httpClient = server.Client()
+	req := model.VPNControlRequest{
+		SessionID: "vpn-session-prepared-stop",
+		Action:    model.VPNActionPrepare,
+		Role:      model.VPNRoleExit,
+		Mode:      model.VPNModeSystemProxy,
+		RelayMode: model.VPNRelayModeDashboard,
+		Core: model.VPNCoreSpec{
+			Name:        "sing-box",
+			SHA256:      sha256HexForTest(content),
+			DownloadURL: server.URL + "/sing-box",
+		},
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID)) })
+	_ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID))
+
+	if _, err := manager.Prepare(req); err != nil {
+		t.Fatalf("prepare VPN core: %v", err)
+	}
+	coreDir := defaultVPNSessionCoreCleanupDir(req.SessionID)
+	if _, err := os.Stat(filepath.Join(coreDir, "core", vpnCoreFileName(req.Core))); err != nil {
+		t.Fatalf("prepared temporary core must exist before stop: %v", err)
+	}
+
+	stopReq := req
+	stopReq.Action = model.VPNActionStop
+	payload, err := manager.Stop(stopReq)
+	if err != nil {
+		t.Fatalf("stop prepared VPN core: %v", err)
+	}
+	if payload.State != model.VPNStateStopped {
+		t.Fatalf("stop must report stopped state, got %#v", payload)
+	}
+	if _, err := os.Stat(coreDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepared temporary core directory must be removed on stop, stat err=%v", err)
+	}
+	if !strings.Contains(strings.Join(payload.Logs, "\n"), "[cleanup] core_remove=ok") {
+		t.Fatalf("stop logs must report core cleanup, got %#v", payload.Logs)
+	}
+}
+
 func TestAgentVPNKeepsExplicitCorePathOnStop(t *testing.T) {
 	originalConfig := agentConfig
 	t.Cleanup(func() { agentConfig = originalConfig })
