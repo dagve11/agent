@@ -90,7 +90,7 @@ func TestPrepareVPNCoreDownloadsMissingCoreAndVerifiesSHA256(t *testing.T) {
 	}
 }
 
-func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnStop(t *testing.T) {
+func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnCleanup(t *testing.T) {
 	originalConfig := agentConfig
 	t.Cleanup(func() { agentConfig = originalConfig })
 	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
@@ -159,8 +159,17 @@ func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnStop(t *testing.T
 	if _, err := manager.Stop(stopReq); err != nil {
 		t.Fatalf("stop VPN: %v", err)
 	}
+	if _, err := os.Stat(session.CoreCleanupDir); err != nil {
+		t.Fatalf("temporary core directory must remain after stop: %v", err)
+	}
+
+	cleanupReq := req
+	cleanupReq.Action = model.VPNActionCleanup
+	if _, err := manager.Cleanup(cleanupReq); err != nil {
+		t.Fatalf("cleanup VPN core: %v", err)
+	}
 	if _, err := os.Stat(session.CoreCleanupDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("temporary core directory must be removed on stop, stat err=%v", err)
+		t.Fatalf("temporary core directory must be removed on cleanup, stat err=%v", err)
 	}
 }
 
@@ -221,7 +230,7 @@ func TestAgentVPNPrepareDownloadsCoreWithoutStartingSidecar(t *testing.T) {
 	}
 }
 
-func TestAgentVPNStopRemovesPreparedTemporaryCore(t *testing.T) {
+func TestAgentVPNCleanupRemovesPreparedTemporaryCore(t *testing.T) {
 	originalConfig := agentConfig
 	t.Cleanup(func() { agentConfig = originalConfig })
 	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
@@ -258,20 +267,20 @@ func TestAgentVPNStopRemovesPreparedTemporaryCore(t *testing.T) {
 		t.Fatalf("prepared temporary core must exist before stop: %v", err)
 	}
 
-	stopReq := req
-	stopReq.Action = model.VPNActionStop
-	payload, err := manager.Stop(stopReq)
+	cleanupReq := req
+	cleanupReq.Action = model.VPNActionCleanup
+	payload, err := manager.Cleanup(cleanupReq)
 	if err != nil {
-		t.Fatalf("stop prepared VPN core: %v", err)
+		t.Fatalf("cleanup prepared VPN core: %v", err)
 	}
 	if payload.State != model.VPNStateStopped {
-		t.Fatalf("stop must report stopped state, got %#v", payload)
+		t.Fatalf("cleanup must report stopped state, got %#v", payload)
 	}
 	if _, err := os.Stat(coreDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("prepared temporary core directory must be removed on stop, stat err=%v", err)
+		t.Fatalf("prepared temporary core directory must be removed on cleanup, stat err=%v", err)
 	}
 	if !strings.Contains(strings.Join(payload.Logs, "\n"), "[cleanup] core_remove=ok") {
-		t.Fatalf("stop logs must report core cleanup, got %#v", payload.Logs)
+		t.Fatalf("cleanup logs must report core cleanup, got %#v", payload.Logs)
 	}
 }
 

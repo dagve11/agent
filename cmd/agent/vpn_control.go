@@ -143,16 +143,14 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	session.coreTemporary = coreTarget.Temporary
 	corePath, err := prepareVPNCore(context.Background(), req.Core, coreTarget.Path, m.httpClient)
 	if err != nil {
-		cleanupLogs := m.cleanupSessionCore(session)
-		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 		sessionCancel()
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
 	}
 	session.CorePath = corePath
 	relay, err := m.attachDashboardRelay(req)
 	if err != nil {
-		cleanupLogs := m.cleanupSessionCore(session)
-		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 		sessionCancel()
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
 	}
@@ -160,8 +158,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	sidecar, err := startAgentVPNSidecar(context.Background(), req, workDir, corePath, m.sidecarRunner)
 	if err != nil {
 		go drainVPNRelayStream(relay)
-		cleanupLogs := m.cleanupSessionCore(session)
-		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 		sessionCancel()
 		err = vpnSidecarStartError(req, err)
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
@@ -172,8 +169,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	if err != nil {
 		_ = sidecar.Stop()
 		go drainVPNRelayStream(relay)
-		cleanupLogs := m.cleanupSessionCore(session)
-		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 		sessionCancel()
 		err = fmt.Errorf("start VPN bridge for session %s role %s: %w", req.SessionID, req.Role, err)
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
@@ -183,8 +179,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		_ = bridge.Close()
 		_ = sidecar.Stop()
 		_ = relay.CloseSend()
-		cleanupLogs := m.cleanupSessionCore(session)
-		cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
+		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 		sessionCancel()
 		err = fmt.Errorf("VPN TUN health probe failed for session %s: %w", req.SessionID, err)
 		return vpnFailedResultWithLogs(req, err, append(cleanupLogs, fmt.Sprintf("[tun-health] %s rollback=sidecar-stopped,relay-closed", err.Error()))), err
@@ -194,8 +189,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 			_ = bridge.Close()
 			_ = sidecar.Stop()
 			_ = relay.CloseSend()
-			cleanupLogs := m.cleanupSessionCore(session)
-			cleanupLogs = append(cleanupLogs, m.restoreSessionTunForStartupFailure(session)...)
+			cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 			sessionCancel()
 			err = fmt.Errorf("apply VPN system proxy for session %s: %w", req.SessionID, err)
 			cleanupLogs = append(cleanupLogs, "[cleanup] rollback=bridge-closed,sidecar-stopped,relay-closed")
@@ -214,7 +208,6 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		_ = bridge.Close()
 		_ = sidecar.Stop()
 		_ = relay.CloseSend()
-		cleanupLogs = append(cleanupLogs, m.cleanupSessionCore(session)...)
 		tunRestoreErr := m.restoreSessionTun(session)
 		if tunRestoreErr != nil {
 			cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=failed: "+tunRestoreErr.Error())
@@ -270,11 +263,7 @@ func (m *AgentVPNManager) Prepare(req model.VPNControlRequest) (model.VPNControl
 	_, statErr := os.Stat(coreTarget.Path)
 	corePath, err := prepareVPNCore(context.Background(), req.Core, coreTarget.Path, m.httpClient)
 	if err != nil {
-		cleanupSession := &AgentVPNSession{
-			CoreCleanupDir: coreTarget.CleanupDir,
-			coreTemporary:  coreTarget.Temporary,
-		}
-		logs := append([]string{"[core] prepare=failed error=" + err.Error()}, m.cleanupSessionCore(cleanupSession)...)
+		logs := []string{"[core] prepare=failed error=" + err.Error()}
 		return vpnFailedResultWithLogs(req, err, logs), err
 	}
 
@@ -306,7 +295,7 @@ func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]st
 	logs, err := m.stopTrackedSession(model.VPNControlRequest{
 		SessionID: sessionID,
 		Action:    model.VPNActionStop,
-	}, true)
+	}, true, false)
 	if err != nil {
 		printf("VPN existing session cleanup failed before start %s: %v", sessionID, err)
 		return logs, err
@@ -315,7 +304,7 @@ func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]st
 }
 
 func (m *AgentVPNManager) Stop(req model.VPNControlRequest) (model.VPNControlResult, error) {
-	logs, err := m.stopTrackedSession(req, false)
+	logs, err := m.stopTrackedSession(req, false, false)
 	if err != nil {
 		return vpnFailedResult(req, err), err
 	}
@@ -329,7 +318,22 @@ func (m *AgentVPNManager) Stop(req model.VPNControlRequest) (model.VPNControlRes
 	}, nil
 }
 
-func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOnTunRestore bool) ([]string, error) {
+func (m *AgentVPNManager) Cleanup(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	logs, err := m.stopTrackedSession(req, false, true)
+	if err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	return model.VPNControlResult{
+		SessionID:     req.SessionID,
+		Action:        req.Action,
+		Role:          req.Role,
+		State:         model.VPNStateStopped,
+		Logs:          logs,
+		StoppedAtUnix: time.Now().Unix(),
+	}, nil
+}
+
+func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOnTunRestore bool, cleanupCore bool) ([]string, error) {
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, errors.New("session_id is required")
 	}
@@ -358,9 +362,9 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 	if session != nil && session.sidecar != nil {
 		_ = session.sidecar.Stop()
 	}
-	if session != nil {
+	if cleanupCore && session != nil {
 		logs = append(logs, m.cleanupSessionCore(session)...)
-	} else {
+	} else if cleanupCore {
 		coreTarget := m.effectiveCoreTarget(req)
 		logs = append(logs, m.cleanupSessionCore(&AgentVPNSession{
 			CoreCleanupDir: coreTarget.CleanupDir,
@@ -543,7 +547,6 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 	if bridge != nil {
 		_ = bridge.Close()
 	}
-	cleanupLogs = append(cleanupLogs, m.cleanupSessionCore(session)...)
 	tunRestoreErr := m.restoreSessionTun(session)
 	if tunRestoreErr != nil {
 		printf("VPN TUN restore failed: %v", tunRestoreErr)
@@ -616,9 +619,6 @@ func (m *AgentVPNManager) CleanupStaleSessions() {
 				printf("VPN stale sidecar state update failed for session %s: %v", state.SessionID, err)
 				continue
 			}
-		}
-		if err := cleanupTemporaryVPNCore(state.CoreCleanupDir, state.CoreTemporary); err != nil {
-			printf("VPN stale core cleanup failed for session %s: %v", state.SessionID, err)
 		}
 		if isVPNTunMode(state.Mode) && strings.TrimSpace(state.TunSnapshotPath) != "" && m.tunManager != nil {
 			req := model.VPNControlRequest{
@@ -1054,8 +1054,10 @@ func handleVPNControlTask(task *pb.Task, result *pb.TaskResult) {
 		payload, err = vpnManager.Prepare(req)
 	case model.VPNActionStart:
 		payload, err = vpnManager.Start(req)
-	case model.VPNActionStop, model.VPNActionCleanup:
+	case model.VPNActionStop:
 		payload, err = vpnManager.Stop(req)
+	case model.VPNActionCleanup:
+		payload, err = vpnManager.Cleanup(req)
 	case model.VPNActionStatus, model.VPNActionLogs:
 		payload, err = vpnManager.Status(req)
 	case model.VPNActionRestart:
@@ -1162,7 +1164,11 @@ func (m *AgentVPNManager) effectiveCoreTarget(req model.VPNControlRequest) vpnCo
 	if strings.TrimSpace(m.corePath) != "" {
 		return vpnCoreTarget{Path: resolveVPNCorePath(m.corePath, spec)}
 	}
-	cleanupDir := defaultVPNSessionCoreCleanupDir(req.SessionID)
+	coreSessionID := strings.TrimSpace(req.Extra["core_session_id"])
+	if coreSessionID == "" {
+		coreSessionID = req.SessionID
+	}
+	cleanupDir := defaultVPNSessionCoreCleanupDir(coreSessionID)
 	return vpnCoreTarget{
 		Path:       filepath.Join(cleanupDir, "core", vpnCoreFileName(spec)),
 		CleanupDir: cleanupDir,
