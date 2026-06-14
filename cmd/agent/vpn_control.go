@@ -30,6 +30,7 @@ type AgentVPNSession struct {
 	CoreCleanupDir     string
 	StatePath          string
 	LastError          string
+	sidecarPID         int
 	tunSnapshotPath    string
 	systemProxyApplied bool
 	coreTemporary      bool
@@ -172,6 +173,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
 	}
 	session.sidecar = sidecar
+	session.sidecarPID = vpnSidecarPID(sidecar)
 	session.ConfigPath, session.LogPath = vpnSidecarMetadata(sidecar)
 	bridge, err := startAgentVPNBridge(context.Background(), req, relay)
 	if err != nil {
@@ -405,6 +407,12 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 	session := m.sessions[req.SessionID]
 	delete(m.sessions, req.SessionID)
 	m.mu.Unlock()
+	if session == nil {
+		if recovered, ok := m.recoverSessionFromState(req); ok {
+			session = recovered
+			logs = append(logs, "[cleanup] state=recovered path="+session.StatePath)
+		}
+	}
 	if session != nil && session.cancel != nil {
 		session.cancel()
 	}
@@ -421,9 +429,15 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 	if session != nil && session.bridge != nil {
 		_ = session.bridge.Close()
 	}
+	sidecarPID := vpnTrackedSessionSidecarPID(session)
 	if session != nil && session.sidecar != nil {
-		_ = session.sidecar.Stop()
+		if err := session.sidecar.Stop(); err != nil && !isStaleSidecarAlreadyGone(err) {
+			logs = append(logs, "[cleanup] sidecar_stop=failed: "+err.Error())
+		}
 	}
+	logs = append(logs, m.cleanupSessionSidecarProcess(session, sidecarPID)...)
+	logs = append(logs, m.cleanupVPNPortSidecars(req)...)
+	sidecarCleanupFailed := vpnSidecarCleanupFailed(logs)
 	if cleanupCore && session != nil {
 		logs = append(logs, m.cleanupSessionCore(session)...)
 	} else if cleanupCore {
@@ -447,7 +461,7 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 	if statePath == "" {
 		statePath = vpnSessionStatePath(m.effectiveWorkDir(), req.SessionID)
 	}
-	if systemProxyRestoreErr == nil && tunRestoreErr == nil {
+	if systemProxyRestoreErr == nil && tunRestoreErr == nil && !sidecarCleanupFailed {
 		if err := removeAgentVPNSessionState(statePath); err != nil {
 			printf("VPN session state remove failed: %v", err)
 		}
@@ -465,6 +479,16 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 	}
 
 	return logs, nil
+}
+
+func vpnSidecarCleanupFailed(logs []string) bool {
+	for _, line := range logs {
+		if strings.Contains(line, "sidecar_stop=failed") ||
+			strings.Contains(line, "kill=failed") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *AgentVPNManager) StopAll(reason string) {
@@ -832,6 +856,73 @@ func (m *AgentVPNManager) Get(sessionID string) (*AgentVPNSession, bool) {
 	return &clone, true
 }
 
+func (m *AgentVPNManager) recoverSessionFromState(req model.VPNControlRequest) (*AgentVPNSession, bool) {
+	statePath := vpnSessionStatePath(m.effectiveWorkDir(), req.SessionID)
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil, false
+	}
+	var state agentVPNSessionState
+	if err := json.Unmarshal(raw, &state); err != nil || strings.TrimSpace(state.SessionID) == "" {
+		return nil, false
+	}
+	recoveredReq := req
+	if strings.TrimSpace(recoveredReq.Role) == "" {
+		recoveredReq.Role = state.Role
+	}
+	if strings.TrimSpace(recoveredReq.Mode) == "" {
+		recoveredReq.Mode = state.Mode
+	}
+	if strings.TrimSpace(recoveredReq.TunName) == "" {
+		recoveredReq.TunName = state.TunName
+	}
+	if strings.TrimSpace(recoveredReq.DNSServer) == "" {
+		recoveredReq.DNSServer = state.DNSServer
+	}
+	return &AgentVPNSession{
+		Request:            recoveredReq,
+		State:              state.State,
+		StartedAt:          state.StartedAt,
+		ConfigPath:         state.ConfigPath,
+		LogPath:            state.LogPath,
+		CorePath:           state.CorePath,
+		CoreCleanupDir:     state.CoreCleanupDir,
+		StatePath:          statePath,
+		sidecarPID:         state.SidecarPID,
+		tunSnapshotPath:    state.TunSnapshotPath,
+		systemProxyApplied: state.SystemProxyApplied,
+		coreTemporary:      state.CoreTemporary,
+	}, true
+}
+
+func (m *AgentVPNManager) cleanupSessionSidecarProcess(session *AgentVPNSession, pid int) []string {
+	if session == nil || pid <= 0 {
+		return nil
+	}
+	killer := m.staleSidecarKiller
+	if killer == nil {
+		killer = killStaleVPNSidecarProcess
+	}
+	if err := killer(pid); err != nil {
+		if isStaleSidecarAlreadyGone(err) {
+			return []string{fmt.Sprintf("[cleanup] sidecar_pid=%d already-gone", pid)}
+		}
+		return []string{fmt.Sprintf("[cleanup] sidecar_pid=%d kill=failed: %s", pid, err.Error())}
+	}
+	session.sidecarPID = 0
+	return []string{fmt.Sprintf("[cleanup] sidecar_pid=%d kill=ok", pid)}
+}
+
+func vpnTrackedSessionSidecarPID(session *AgentVPNSession) int {
+	if session == nil {
+		return 0
+	}
+	if pid := vpnSidecarPID(session.sidecar); pid > 0 {
+		return pid
+	}
+	return session.sidecarPID
+}
+
 func (m *AgentVPNManager) watchSidecar(sessionID string, sidecar *AgentVPNSidecar) {
 	if sidecar == nil {
 		return
@@ -1016,7 +1107,7 @@ func (m *AgentVPNManager) persistSessionState(session *AgentVPNSession) error {
 		CoreTemporary:      session.coreTemporary,
 		TunName:            session.Request.TunName,
 		DNSServer:          session.Request.DNSServer,
-		SidecarPID:         vpnSidecarPID(session.sidecar),
+		SidecarPID:         vpnTrackedSessionSidecarPID(session),
 		SystemProxyApplied: session.systemProxyApplied,
 		TunSnapshotPath:    session.tunSnapshotPath,
 		StartedAt:          session.StartedAt,
@@ -1050,7 +1141,7 @@ func (m *AgentVPNManager) persistSessionRecoveryState(session *AgentVPNSession) 
 		CoreTemporary:      session.coreTemporary,
 		TunName:            session.Request.TunName,
 		DNSServer:          session.Request.DNSServer,
-		SidecarPID:         vpnSidecarPID(session.sidecar),
+		SidecarPID:         vpnTrackedSessionSidecarPID(session),
 		SystemProxyApplied: session.systemProxyApplied,
 		TunSnapshotPath:    session.tunSnapshotPath,
 		StartedAt:          session.StartedAt,
