@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -24,6 +26,8 @@ const (
 	vpnInboundLocalSOCKS     = "local-socks"
 	vpnInboundRelay          = "relay-in"
 	vpnSingBoxConfigLogLevel = "info"
+	vpnRuleSetGeositeCN      = "geosite-cn"
+	vpnRuleSetGeoIPCN        = "geoip-cn"
 )
 
 var defaultVPNSensitiveCIDRs = []string{
@@ -192,11 +196,7 @@ func buildVPNEntryRoute(req model.VPNControlRequest) map[string]any {
 	}
 	switch ruleMode {
 	case model.VPNRuleModeGlobal:
-		return map[string]any{
-			"auto_detect_interface": true,
-			"rules":                 rules,
-			"final":                 vpnOutboundExit,
-		}
+		return buildVPNRoute(rules, vpnOutboundExit, nil)
 	case model.VPNRuleModeIP:
 		if cidrs := cleanStrings(req.Rules.CIDRs); len(cidrs) > 0 {
 			rules = append(rules, map[string]any{
@@ -219,11 +219,75 @@ func buildVPNEntryRoute(req model.VPNControlRequest) map[string]any {
 		}
 	}
 
-	return map[string]any{
+	if ruleSets, ok := activeVPNRuleSetRouteItems(req); ok {
+		rules = append(rules,
+			map[string]any{
+				"rule_set": vpnRuleSetGeositeCN,
+				"outbound": vpnOutboundDirect,
+			},
+			map[string]any{
+				"rule_set": vpnRuleSetGeoIPCN,
+				"outbound": vpnOutboundDirect,
+			},
+		)
+		return buildVPNRoute(rules, vpnOutboundExit, ruleSets)
+	}
+
+	return buildVPNRoute(rules, vpnOutboundDirect, nil)
+}
+
+func buildVPNRoute(rules []map[string]any, final string, ruleSets []map[string]any) map[string]any {
+	route := map[string]any{
 		"auto_detect_interface": true,
 		"rules":                 rules,
-		"final":                 vpnOutboundDirect,
+		"final":                 final,
 	}
+	if len(ruleSets) > 0 {
+		route["rule_set"] = ruleSets
+	}
+	return route
+}
+
+func activeVPNRuleSetRouteItems(req model.VPNControlRequest) ([]map[string]any, bool) {
+	rulesDir := vpnRuleSetDirFromRequest(req)
+	if strings.TrimSpace(rulesDir) == "" {
+		return nil, false
+	}
+	geositePath := filepath.Join(rulesDir, vpnRuleSetGeositeCN+".srs")
+	geoipPath := filepath.Join(rulesDir, vpnRuleSetGeoIPCN+".srs")
+	if !vpnRuleSetFileReady(geositePath) || !vpnRuleSetFileReady(geoipPath) {
+		return nil, false
+	}
+	return []map[string]any{
+		{
+			"type":   "local",
+			"tag":    vpnRuleSetGeositeCN,
+			"format": "binary",
+			"path":   geositePath,
+		},
+		{
+			"type":   "local",
+			"tag":    vpnRuleSetGeoIPCN,
+			"format": "binary",
+			"path":   geoipPath,
+		},
+	}, true
+}
+
+func vpnRuleSetFileReady(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func vpnRuleSetDirFromRequest(req model.VPNControlRequest) string {
+	if dir := strings.TrimSpace(req.Extra["rules_dir"]); dir != "" {
+		return dir
+	}
+	coreSessionID := strings.TrimSpace(req.Extra["core_session_id"])
+	if coreSessionID == "" {
+		coreSessionID = req.SessionID
+	}
+	return filepath.Join(defaultVPNSessionCoreCleanupDir(coreSessionID), "rules")
 }
 
 func buildVPNTunDNS(req model.VPNControlRequest) map[string]any {

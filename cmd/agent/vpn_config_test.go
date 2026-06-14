@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/nezhahq/agent/model"
@@ -81,6 +83,68 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
 		"outbound": "block",
 		"ip_cidr":  defaultSensitiveCIDRsForTest(),
+	})
+}
+
+func TestBuildVPNSingBoxConfigEntryUsesLocalRuleSetsWhenPresent(t *testing.T) {
+	rulesDir := t.TempDir()
+	for _, name := range []string{vpnRuleSetGeositeCN + ".srs", vpnRuleSetGeoIPCN + ".srs"} {
+		if err := os.WriteFile(filepath.Join(rulesDir, name), []byte("rule-set"), 0600); err != nil {
+			t.Fatalf("write rule-set file %s: %v", name, err)
+		}
+	}
+
+	req := model.VPNControlRequest{
+		SessionID:   "vpn-session-rules",
+		Role:        model.VPNRoleEntry,
+		Mode:        model.VPNModeSystemProxy,
+		ListenSOCKS: "127.0.0.1:1080",
+		Rules: model.VPNRules{
+			Mode:    model.VPNRuleModeDomain,
+			Domains: []string{"github.com"},
+		},
+		Extra: map[string]string{
+			"bridge_addr": "127.0.0.1:19090",
+			"rules_dir":   rulesDir,
+		},
+	}
+
+	raw, err := buildVPNSingBoxConfig(req)
+	if err != nil {
+		t.Fatalf("build entry config: %v", err)
+	}
+	cfg := decodeSingBoxConfigForTest(t, raw)
+
+	route := cfg.object("route")
+	if route["final"] != "vpn-exit" {
+		t.Fatalf("rule-set routing must default unmatched traffic to vpn-exit, got %#v", route["final"])
+	}
+	ruleSets := route.array("rule_set")
+	assertObjectWithFieldsForTest(t, ruleSets, map[string]any{
+		"type":   "local",
+		"tag":    "geosite-cn",
+		"format": "binary",
+		"path":   filepath.Join(rulesDir, "geosite-cn.srs"),
+	})
+	assertObjectWithFieldsForTest(t, ruleSets, map[string]any{
+		"type":   "local",
+		"tag":    "geoip-cn",
+		"format": "binary",
+		"path":   filepath.Join(rulesDir, "geoip-cn.srs"),
+	})
+
+	rules := route.array("rules")
+	assertObjectWithFieldsForTest(t, rules, map[string]any{
+		"outbound": "vpn-exit",
+		"domain":   []any{"github.com"},
+	})
+	assertObjectWithFieldsForTest(t, rules, map[string]any{
+		"outbound": "direct",
+		"rule_set": "geosite-cn",
+	})
+	assertObjectWithFieldsForTest(t, rules, map[string]any{
+		"outbound": "direct",
+		"rule_set": "geoip-cn",
 	})
 }
 
