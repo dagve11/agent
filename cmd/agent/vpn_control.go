@@ -53,6 +53,8 @@ type AgentVPNManager struct {
 	logPollInterval    time.Duration
 }
 
+var vpnRuleSetStatusFiles = []string{"manifest.json", "geosite-cn.srs", "geoip-cn.srs"}
+
 var vpnManager = NewAgentVPNManager()
 
 func NewAgentVPNManager() *AgentVPNManager {
@@ -465,12 +467,14 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 	session := m.sessions[req.SessionID]
 	m.mu.Unlock()
 	if session == nil {
-		return model.VPNControlResult{
+		payload := model.VPNControlResult{
 			SessionID: req.SessionID,
 			Action:    req.Action,
 			Role:      req.Role,
 			State:     model.VPNStateStopped,
-		}, nil
+		}
+		m.attachStatusFileState(&payload, req, nil)
+		return payload, nil
 	}
 	payload := model.VPNControlResult{
 		SessionID:     req.SessionID,
@@ -484,7 +488,137 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 		StartedAtUnix: session.StartedAt.Unix(),
 	}
 	payload.Logs = readVPNLogTail(session.LogPath, 200)
+	m.attachStatusFileState(&payload, req, session)
 	return payload, nil
+}
+
+func (m *AgentVPNManager) attachStatusFileState(payload *model.VPNControlResult, req model.VPNControlRequest, session *AgentVPNSession) {
+	if payload == nil {
+		return
+	}
+	payload.CheckID = strings.TrimSpace(req.Extra["status_check_id"])
+	coreError := ""
+	payload.CoreStatus, payload.CorePath, coreError = m.inspectVPNCoreStatus(req, session)
+	if coreError != "" {
+		if payload.LastError != "" {
+			payload.LastError += "; " + coreError
+		} else {
+			payload.LastError = coreError
+		}
+	}
+	if payload.CoreStatus == "ready" {
+		payload.CoreVersion = strings.TrimSpace(req.Core.Version)
+	}
+	rulesDetail := ""
+	payload.RulesStatus, payload.RulesPath, rulesDetail = m.inspectVPNRulesStatus(req)
+	if payload.RulesStatus == "ready" {
+		payload.RulesVersion = rulesDetail
+	}
+
+	logs := []string{
+		fmt.Sprintf("[core] status=%s path=%s", payload.CoreStatus, emptyVPNStatusValue(payload.CorePath)),
+		fmt.Sprintf("[rules] status=%s path=%s", payload.RulesStatus, emptyVPNStatusValue(payload.RulesPath)),
+	}
+	if payload.CoreVersion != "" {
+		logs[0] += " version=" + payload.CoreVersion
+	}
+	if coreError != "" {
+		logs[0] += " error=" + coreError
+	}
+	if payload.RulesVersion != "" {
+		logs[1] += " version=" + payload.RulesVersion
+	} else if rulesDetail != "" {
+		logs[1] += " detail=" + rulesDetail
+	}
+	payload.Logs = append(payload.Logs, logs...)
+}
+
+func (m *AgentVPNManager) inspectVPNCoreStatus(req model.VPNControlRequest, session *AgentVPNSession) (string, string, string) {
+	coreTarget := m.effectiveCoreTarget(req)
+	corePath := strings.TrimSpace(coreTarget.Path)
+	if session != nil && strings.TrimSpace(session.CorePath) != "" {
+		corePath = strings.TrimSpace(session.CorePath)
+	}
+	if corePath == "" {
+		return "unknown", "", "core path is empty"
+	}
+	info, err := os.Stat(corePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "missing", corePath, ""
+		}
+		return "error", corePath, err.Error()
+	}
+	if info.IsDir() {
+		return "error", corePath, "core path is a directory"
+	}
+	if err := verifyVPNCoreSHA256(corePath, req.Core.SHA256); err != nil {
+		return "error", corePath, err.Error()
+	}
+	return "ready", corePath, ""
+}
+
+func (m *AgentVPNManager) inspectVPNRulesStatus(req model.VPNControlRequest) (string, string, string) {
+	rulesDir := m.effectiveRuleSetDir(req)
+	missing := make([]string, 0, len(vpnRuleSetStatusFiles))
+	for _, name := range vpnRuleSetStatusFiles {
+		path := filepath.Join(rulesDir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				missing = append(missing, name)
+				continue
+			}
+			return "error", rulesDir, err.Error()
+		}
+		if info.IsDir() {
+			return "error", rulesDir, name + " is a directory"
+		}
+	}
+	if len(missing) > 0 {
+		return "missing", rulesDir, "missing=" + strings.Join(missing, ",")
+	}
+	return "ready", rulesDir, readVPNRulesManifestVersion(filepath.Join(rulesDir, "manifest.json"))
+}
+
+func (m *AgentVPNManager) effectiveRuleSetDir(req model.VPNControlRequest) string {
+	if dir := strings.TrimSpace(req.Extra["rules_dir"]); dir != "" {
+		return dir
+	}
+	coreTarget := m.effectiveCoreTarget(req)
+	if strings.TrimSpace(coreTarget.CleanupDir) != "" {
+		return filepath.Join(coreTarget.CleanupDir, "rules")
+	}
+	coreSessionID := strings.TrimSpace(req.Extra["core_session_id"])
+	if coreSessionID == "" {
+		coreSessionID = req.SessionID
+	}
+	return filepath.Join(defaultVPNSessionCoreCleanupDir(coreSessionID), "rules")
+}
+
+func readVPNRulesManifestVersion(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return ""
+	}
+	for _, key := range []string{"version", "tag", "generated_at", "updated_at"} {
+		if value, ok := manifest[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func emptyVPNStatusValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func (m *AgentVPNManager) Get(sessionID string) (*AgentVPNSession, bool) {

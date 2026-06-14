@@ -136,7 +136,13 @@ type VPNControlResult struct {
 	Action        string   `json:"action"`
 	Role          string   `json:"role"`
 	State         string   `json:"state"`
+	CheckID       string   `json:"check_id,omitempty"`
 	CoreVersion   string   `json:"core_version,omitempty"`
+	CoreStatus    string   `json:"core_status,omitempty"`
+	CorePath      string   `json:"core_path,omitempty"`
+	RulesStatus   string   `json:"rules_status,omitempty"`
+	RulesPath     string   `json:"rules_path,omitempty"`
+	RulesVersion  string   `json:"rules_version,omitempty"`
 	LocalHTTP     string   `json:"local_http,omitempty"`
 	LocalSOCKS    string   `json:"local_socks,omitempty"`
 	TunName       string   `json:"tun_name,omitempty"`
