@@ -27,8 +27,8 @@ type vpnHTTPClient interface {
 var vpnCoreSHA256HexPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
 const (
-	defaultVPNCoreDownloadBaseURL   = "https://github.com/dagve11/sb-core/releases/latest/download"
-	defaultVPNCoreCNDownloadBaseURL = "https://gitee.com/AGZZY11/sb-core/releases/download/V1.0.1"
+	defaultVPNCoreDownloadBaseURL   = "https://github.com/dagve11/sb-core/releases/download/V1.0.0"
+	defaultVPNCoreCNDownloadBaseURL = "https://gitee.com/AGZZY11/sb-core/releases/download/V1.0.0"
 	maxVPNCoreDownloadRedirects     = 5
 	maxVPNCoreManifestBytes         = 1 << 20
 	vpnCoreGeoCheckTimeout          = 3 * time.Second
