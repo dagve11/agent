@@ -3,20 +3,39 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 )
 
-const winINetSettingsKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+const (
+	winCurrentUserRoot     = `HKCU`
+	winUsersRoot           = `HKEY_USERS`
+	winINetSettingsSubKey  = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+	winProxyEnableValue    = "ProxyEnable"
+	winProxyServerValue    = "ProxyServer"
+	winProxyOverrideValue  = "ProxyOverride"
+	winProxyOverrideLocal  = "<local>"
+	winRegTypeDWORD        = "REG_DWORD"
+	winRegTypeString       = "REG_SZ"
+	winSettingsChangedFlag = 39
+	winSettingsRefreshFlag = 37
+)
 
-type windowsVPNSystemProxyManager struct {
-	mu            sync.Mutex
-	applied       bool
+type windowsProxySnapshot struct {
+	key           string
 	proxyEnable   *string
 	proxyServer   *string
 	proxyOverride *string
+}
+
+type windowsVPNSystemProxyManager struct {
+	mu        sync.Mutex
+	applied   bool
+	snapshots []windowsProxySnapshot
 }
 
 func newPlatformVPNSystemProxyManager() vpnSystemProxyManager {
@@ -37,15 +56,34 @@ func (m *windowsVPNSystemProxyManager) Apply(httpAddr string, socksAddr string) 
 	if proxyServer == "" {
 		return fmt.Errorf("system proxy requires http or socks listen address")
 	}
-	if err := setWindowsRegistryDWORD("ProxyEnable", "1"); err != nil {
+
+	targets, err := windowsProxyTargetKeys()
+	if err != nil {
 		return err
 	}
-	if err := setWindowsRegistryString("ProxyServer", proxyServer); err != nil {
-		return err
+	if len(targets) == 0 {
+		return errors.New("no Windows user registry hive found for system proxy")
 	}
-	if err := setWindowsRegistryString("ProxyOverride", "<local>"); err != nil {
-		return err
+
+	snapshots := m.snapshots
+	if !m.applied {
+		snapshots = windowsProxySnapshots(targets)
+		m.snapshots = snapshots
 	}
+
+	changed := make([]windowsProxySnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if err := applyWindowsProxyToKey(snapshot.key, proxyServer); err != nil {
+			_ = restoreWindowsProxySnapshots(changed)
+			notifyWindowsProxySettingsChanged()
+			return err
+		}
+		changed = append(changed, snapshot)
+	}
+	if len(changed) == 0 {
+		return errors.New("no Windows proxy registry target was changed")
+	}
+	notifyWindowsProxySettingsChanged()
 	m.applied = true
 	return nil
 }
@@ -57,16 +95,13 @@ func (m *windowsVPNSystemProxyManager) Restore() error {
 	if !m.applied {
 		return nil
 	}
-	if err := restoreWindowsRegistryValue("ProxyEnable", "REG_DWORD", m.proxyEnable); err != nil {
-		return err
-	}
-	if err := restoreWindowsRegistryValue("ProxyServer", "REG_SZ", m.proxyServer); err != nil {
-		return err
-	}
-	if err := restoreWindowsRegistryValue("ProxyOverride", "REG_SZ", m.proxyOverride); err != nil {
+	err := restoreWindowsProxySnapshots(m.snapshots)
+	notifyWindowsProxySettingsChanged()
+	if err != nil {
 		return err
 	}
 	m.applied = false
+	m.snapshots = nil
 	return nil
 }
 
@@ -83,8 +118,90 @@ func buildWindowsProxyServer(httpAddr string, socksAddr string) string {
 	return strings.Join(parts, ";")
 }
 
-func readWindowsRegistryValue(name string) *string {
-	out, err := exec.Command("reg", "query", winINetSettingsKey, "/v", name).CombinedOutput()
+func windowsProxyTargetKeys() ([]string, error) {
+	userRoots, err := queryWindowsLoadedUserRoots()
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]string, 0, len(userRoots)+1)
+	for _, root := range userRoots {
+		targets = append(targets, windowsRegistryKey(root, winINetSettingsSubKey))
+	}
+	if len(targets) == 0 {
+		targets = append(targets, windowsRegistryKey(winCurrentUserRoot, winINetSettingsSubKey))
+	}
+	return cleanStrings(targets), nil
+}
+
+func queryWindowsLoadedUserRoots() ([]string, error) {
+	out, err := exec.Command("reg", "query", winUsersRoot).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("reg query %s failed: %w: %s", winUsersRoot, err, strings.TrimSpace(string(out)))
+	}
+	roots := make([]string, 0)
+	for _, line := range strings.Split(string(out), "\n") {
+		root := strings.TrimSpace(line)
+		if isWindowsUserRegistryRoot(root) {
+			roots = append(roots, root)
+		}
+	}
+	return roots, nil
+}
+
+func isWindowsUserRegistryRoot(root string) bool {
+	sid := strings.TrimSpace(root)
+	sid = strings.TrimPrefix(sid, winUsersRoot+`\`)
+	if sid == root || sid == "" || strings.HasSuffix(strings.ToLower(sid), `_classes`) {
+		return false
+	}
+	switch strings.ToUpper(sid) {
+	case ".DEFAULT", "S-1-5-18", "S-1-5-19", "S-1-5-20":
+		return false
+	}
+	return strings.HasPrefix(sid, "S-1-5-21-") || strings.HasPrefix(sid, "S-1-12-1-")
+}
+
+func windowsProxySnapshots(keys []string) []windowsProxySnapshot {
+	snapshots := make([]windowsProxySnapshot, 0, len(keys))
+	for _, key := range keys {
+		snapshots = append(snapshots, windowsProxySnapshot{
+			key:           key,
+			proxyEnable:   readWindowsRegistryValue(key, winProxyEnableValue),
+			proxyServer:   readWindowsRegistryValue(key, winProxyServerValue),
+			proxyOverride: readWindowsRegistryValue(key, winProxyOverrideValue),
+		})
+	}
+	return snapshots
+}
+
+func applyWindowsProxyToKey(key string, proxyServer string) error {
+	if err := setWindowsRegistryDWORD(key, winProxyEnableValue, "1"); err != nil {
+		return err
+	}
+	if err := setWindowsRegistryString(key, winProxyServerValue, proxyServer); err != nil {
+		return err
+	}
+	return setWindowsRegistryString(key, winProxyOverrideValue, winProxyOverrideLocal)
+}
+
+func restoreWindowsProxySnapshots(snapshots []windowsProxySnapshot) error {
+	errs := make([]error, 0)
+	for _, snapshot := range snapshots {
+		if err := restoreWindowsRegistryValue(snapshot.key, winProxyEnableValue, winRegTypeDWORD, snapshot.proxyEnable); err != nil {
+			errs = append(errs, err)
+		}
+		if err := restoreWindowsRegistryValue(snapshot.key, winProxyServerValue, winRegTypeString, snapshot.proxyServer); err != nil {
+			errs = append(errs, err)
+		}
+		if err := restoreWindowsRegistryValue(snapshot.key, winProxyOverrideValue, winRegTypeString, snapshot.proxyOverride); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func readWindowsRegistryValue(key string, name string) *string {
+	out, err := exec.Command("reg", "query", key, "/v", name).CombinedOutput()
 	if err != nil {
 		return nil
 	}
@@ -99,30 +216,51 @@ func readWindowsRegistryValue(name string) *string {
 	return nil
 }
 
-func restoreWindowsRegistryValue(name string, kind string, value *string) error {
+func restoreWindowsRegistryValue(key string, name string, kind string, value *string) error {
 	if value == nil {
-		return deleteWindowsRegistryValue(name)
+		return deleteWindowsRegistryValue(key, name)
 	}
-	if kind == "REG_DWORD" {
-		return setWindowsRegistryDWORD(name, *value)
+	if kind == winRegTypeDWORD {
+		return setWindowsRegistryDWORD(key, name, *value)
 	}
-	return setWindowsRegistryString(name, *value)
+	return setWindowsRegistryString(key, name, *value)
 }
 
-func setWindowsRegistryDWORD(name string, value string) error {
-	return runWindowsRegistry("add", winINetSettingsKey, "/v", name, "/t", "REG_DWORD", "/d", value, "/f")
+func setWindowsRegistryDWORD(key string, name string, value string) error {
+	return runWindowsRegistry("add", key, "/v", name, "/t", winRegTypeDWORD, "/d", value, "/f")
 }
 
-func setWindowsRegistryString(name string, value string) error {
-	return runWindowsRegistry("add", winINetSettingsKey, "/v", name, "/t", "REG_SZ", "/d", value, "/f")
+func setWindowsRegistryString(key string, name string, value string) error {
+	return runWindowsRegistry("add", key, "/v", name, "/t", winRegTypeString, "/d", value, "/f")
 }
 
-func deleteWindowsRegistryValue(name string) error {
-	err := runWindowsRegistry("delete", winINetSettingsKey, "/v", name, "/f")
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unable to find") {
+func deleteWindowsRegistryValue(key string, name string) error {
+	err := runWindowsRegistry("delete", key, "/v", name, "/f")
+	if err != nil && isWindowsRegistryMissingValueError(err) {
 		return nil
 	}
 	return err
+}
+
+func isWindowsRegistryMissingValueError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unable to find") ||
+		strings.Contains(message, "not found") ||
+		strings.Contains(message, "找不到")
+}
+
+func windowsRegistryKey(root string, subKey string) string {
+	return strings.TrimRight(root, `\`) + `\` + strings.TrimLeft(subKey, `\`)
+}
+
+func notifyWindowsProxySettingsChanged() {
+	wininet := syscall.NewLazyDLL("wininet.dll")
+	internetSetOption := wininet.NewProc("InternetSetOptionW")
+	_, _, _ = internetSetOption.Call(0, uintptr(winSettingsChangedFlag), 0, 0)
+	_, _, _ = internetSetOption.Call(0, uintptr(winSettingsRefreshFlag), 0, 0)
 }
 
 func runWindowsRegistry(args ...string) error {
