@@ -27,11 +27,10 @@ type vpnHTTPClient interface {
 var vpnCoreSHA256HexPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
 const (
-	defaultVPNCoreDownloadBaseURL   = "https://github.com/dagve11/sb-core/releases/download/V1.0.0"
-	defaultVPNCoreCNDownloadBaseURL = "https://gitee.com/AGZZY11/sb-core/releases/download/V1.0.0"
-	maxVPNCoreDownloadRedirects     = 5
-	maxVPNCoreManifestBytes         = 1 << 20
-	vpnCoreGeoCheckTimeout          = 3 * time.Second
+	defaultVPNCoreDownloadBaseURL = "https://github.com/dagve11/sb-core/releases/download/V1.0.0"
+	maxVPNCoreDownloadRedirects   = 5
+	maxVPNCoreManifestBytes       = 1 << 20
+	vpnCoreGeoCheckTimeout        = 3 * time.Second
 )
 
 var vpnCoreCNTraceURLs = []string{
@@ -182,12 +181,8 @@ func vpnCoreDownloadCandidates(ctx context.Context, spec model.VPNCoreSpec, http
 		return nil, fmt.Errorf("unsupported VPN core platform %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	preferCN := false
-	if shouldDetectVPNCoreCNNetwork(spec) {
-		preferCN = detectVPNCoreCNNetwork(ctx, httpClient)
-	}
-	baseURLs := orderedVPNCoreBaseURLs(spec, preferCN)
-	manifestURLs := orderedVPNCoreManifestURLs(spec, baseURLs, preferCN)
+	baseURLs := orderedVPNCoreBaseURLs(spec)
+	manifestURLs := orderedVPNCoreManifestURLs(spec, baseURLs)
 
 	manifestAsset, _ := loadVPNCoreManifestAsset(ctx, manifestURLs, assetName, httpClient)
 	downloadAsset := assetName
@@ -199,14 +194,7 @@ func vpnCoreDownloadCandidates(ctx context.Context, spec model.VPNCoreSpec, http
 		sha256Value = strings.TrimSpace(manifestAsset.SHA256)
 	}
 
-	candidates := make([]vpnCoreDownloadCandidate, 0, len(baseURLs)+2)
-	if preferCN {
-		candidates = appendVPNCoreCandidate(candidates, manifestAsset.CNURL, sha256Value)
-		candidates = appendVPNCoreCandidate(candidates, manifestAsset.URL, sha256Value)
-	} else {
-		candidates = appendVPNCoreCandidate(candidates, manifestAsset.URL, sha256Value)
-		candidates = appendVPNCoreCandidate(candidates, manifestAsset.CNURL, sha256Value)
-	}
+	candidates := make([]vpnCoreDownloadCandidate, 0, len(baseURLs))
 	for _, baseURL := range baseURLs {
 		assetURL, err := joinVPNCoreAssetURL(baseURL, downloadAsset)
 		if err != nil {
@@ -217,10 +205,15 @@ func vpnCoreDownloadCandidates(ctx context.Context, spec model.VPNCoreSpec, http
 	return candidates, nil
 }
 
-func shouldDetectVPNCoreCNNetwork(spec model.VPNCoreSpec) bool {
-	globalURL := strings.TrimSpace(spec.DownloadBaseURL)
-	cnURL := strings.TrimSpace(spec.CNDownloadBaseURL)
-	return (globalURL == "" && cnURL == "") || (globalURL != "" && cnURL != "")
+func vpnCoreAssetName(goos string, goarch string) string {
+	if strings.TrimSpace(goos) == "" || strings.TrimSpace(goarch) == "" {
+		return ""
+	}
+	name := "sing-box-" + goos + "-" + goarch
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return name
 }
 
 func detectVPNCoreCNNetwork(ctx context.Context, httpClient vpnHTTPClient) bool {
@@ -262,38 +255,18 @@ func detectVPNCoreCNNetwork(ctx context.Context, httpClient vpnHTTPClient) bool 
 	return false
 }
 
-func vpnCoreAssetName(goos string, goarch string) string {
-	if strings.TrimSpace(goos) == "" || strings.TrimSpace(goarch) == "" {
-		return ""
-	}
-	name := "sing-box-" + goos + "-" + goarch
-	if goos == "windows" {
-		name += ".exe"
-	}
-	return name
-}
-
-func orderedVPNCoreBaseURLs(spec model.VPNCoreSpec, preferCN bool) []string {
+func orderedVPNCoreBaseURLs(spec model.VPNCoreSpec) []string {
 	globalURL := strings.TrimSpace(spec.DownloadBaseURL)
-	cnURL := strings.TrimSpace(spec.CNDownloadBaseURL)
-	if globalURL == "" && cnURL == "" {
+	if globalURL == "" {
 		globalURL = defaultVPNCoreDownloadBaseURL
-		cnURL = defaultVPNCoreCNDownloadBaseURL
 	}
-	if preferCN {
-		return compactVPNCoreURLs(cnURL, globalURL)
-	}
-	return compactVPNCoreURLs(globalURL, cnURL)
+	return compactVPNCoreURLs(globalURL)
 }
 
-func orderedVPNCoreManifestURLs(spec model.VPNCoreSpec, baseURLs []string, preferCN bool) []string {
+func orderedVPNCoreManifestURLs(spec model.VPNCoreSpec, baseURLs []string) []string {
 	globalURL := strings.TrimSpace(spec.ManifestURL)
-	cnURL := strings.TrimSpace(spec.CNManifestURL)
-	if globalURL != "" || cnURL != "" {
-		if preferCN {
-			return compactVPNCoreURLs(cnURL, globalURL)
-		}
-		return compactVPNCoreURLs(globalURL, cnURL)
+	if globalURL != "" {
+		return compactVPNCoreURLs(globalURL)
 	}
 
 	manifestURLs := make([]string, 0, len(baseURLs))
