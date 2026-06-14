@@ -55,6 +55,11 @@ type AgentVPNManager struct {
 
 var vpnRuleSetStatusFiles = []string{"manifest.json", "geosite-cn.srs", "geoip-cn.srs"}
 
+const (
+	defaultVPNRulesDownloadBaseURL   = "https://github.com/dagve11/sb-rules/releases/latest/download"
+	defaultVPNRulesCNDownloadBaseURL = "https://gitee.com/AGZZY11/sb-rules/raw/main/dist"
+)
+
 var vpnManager = NewAgentVPNManager()
 
 func NewAgentVPNManager() *AgentVPNManager {
@@ -332,6 +337,60 @@ func (m *AgentVPNManager) Cleanup(req model.VPNControlRequest) (model.VPNControl
 		State:         model.VPNStateStopped,
 		Logs:          logs,
 		StoppedAtUnix: time.Now().Unix(),
+	}, nil
+}
+
+func (m *AgentVPNManager) PrepareRules(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	if err := validateVPNControlRequest(req); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := vpnDisabledByConfig(); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	if err := vpnModeAllowedByConfig(req.Mode); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+
+	rulesDir := m.effectiveRuleSetDir(req)
+	source, err := prepareVPNRuleSet(context.Background(), rulesDir, m.httpClient)
+	if err != nil {
+		logs := []string{"[rules] prepare=failed error=" + err.Error()}
+		return vpnFailedResultWithLogs(req, err, logs), err
+	}
+	return model.VPNControlResult{
+		SessionID:    req.SessionID,
+		Action:       req.Action,
+		Role:         req.Role,
+		State:        model.VPNStatePrepared,
+		RulesStatus:  "ready",
+		RulesPath:    rulesDir,
+		RulesVersion: readVPNRulesManifestVersion(filepath.Join(rulesDir, "manifest.json")),
+		Logs: []string{
+			fmt.Sprintf("[rules] prepare=downloaded path=%s source=%s", rulesDir, source),
+		},
+	}, nil
+}
+
+func (m *AgentVPNManager) CleanupRules(req model.VPNControlRequest) (model.VPNControlResult, error) {
+	if err := validateVPNControlRequest(req); err != nil {
+		return vpnFailedResult(req, err), err
+	}
+	rulesDir := m.effectiveRuleSetDir(req)
+	if err := cleanupVPNRuleSet(rulesDir); err != nil {
+		logs := []string{"[rules] cleanup=failed error=" + err.Error()}
+		return vpnFailedResultWithLogs(req, err, logs), err
+	}
+	return model.VPNControlResult{
+		SessionID:     req.SessionID,
+		Action:        req.Action,
+		Role:          req.Role,
+		State:         model.VPNStateStopped,
+		RulesStatus:   "missing",
+		RulesPath:     rulesDir,
+		StoppedAtUnix: time.Now().Unix(),
+		Logs: []string{
+			fmt.Sprintf("[rules] cleanup=ok path=%s", rulesDir),
+		},
 	}, nil
 }
 
@@ -619,6 +678,145 @@ func emptyVPNStatusValue(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func prepareVPNRuleSet(ctx context.Context, rulesDir string, httpClient vpnHTTPClient) (string, error) {
+	rulesDir = strings.TrimSpace(rulesDir)
+	if rulesDir == "" {
+		return "", errors.New("VPN rules directory is required")
+	}
+	if !isSafeVPNRuleSetDir(rulesDir) {
+		return "", fmt.Errorf("refusing to write unsafe VPN rules directory %q", rulesDir)
+	}
+	preferCN := detectVPNCoreCNNetwork(ctx, httpClient)
+	baseURLs := orderedVPNRuleSetBaseURLs(preferCN)
+	if len(baseURLs) == 0 {
+		return "", errors.New("no VPN rule-set download URLs")
+	}
+	stageDir := rulesDir + ".tmp"
+	_ = os.RemoveAll(stageDir)
+	if err := os.MkdirAll(stageDir, 0750); err != nil {
+		return "", err
+	}
+	var firstSource string
+	for _, name := range vpnRuleSetStatusFiles {
+		source, err := downloadVPNRuleSetAsset(ctx, baseURLs, name, filepath.Join(stageDir, name), httpClient)
+		if err != nil {
+			_ = os.RemoveAll(stageDir)
+			return "", err
+		}
+		if firstSource == "" {
+			firstSource = source
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(rulesDir), 0750); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", err
+	}
+	if err := os.RemoveAll(rulesDir); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", err
+	}
+	if err := os.Rename(stageDir, rulesDir); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", err
+	}
+	return firstSource, nil
+}
+
+func orderedVPNRuleSetBaseURLs(preferCN bool) []string {
+	globalURL := strings.TrimSpace(os.Getenv("NZ_VPN_RULES_BASE_URL"))
+	cnURL := strings.TrimSpace(os.Getenv("NZ_VPN_RULES_CN_BASE_URL"))
+	if globalURL == "" {
+		globalURL = defaultVPNRulesDownloadBaseURL
+	}
+	if cnURL == "" {
+		cnURL = defaultVPNRulesCNDownloadBaseURL
+	}
+	if preferCN {
+		return compactVPNCoreURLs(cnURL, globalURL)
+	}
+	return compactVPNCoreURLs(globalURL, cnURL)
+}
+
+func downloadVPNRuleSetAsset(ctx context.Context, baseURLs []string, asset string, targetPath string, httpClient vpnHTTPClient) (string, error) {
+	var lastErr error
+	for _, baseURL := range baseURLs {
+		assetURL, err := joinVPNCoreAssetURL(baseURL, asset)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := downloadVPNRuleSetFile(ctx, assetURL, targetPath, httpClient); err != nil {
+			lastErr = err
+			continue
+		}
+		return assetURL, nil
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("download VPN rule-set %s failed: %w", asset, lastErr)
+	}
+	return "", fmt.Errorf("download VPN rule-set %s failed: no candidate URLs", asset)
+}
+
+func downloadVPNRuleSetFile(ctx context.Context, rawURL string, targetPath string, httpClient vpnHTTPClient) error {
+	resp, err := openVPNCoreDownload(ctx, rawURL, httpClient)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("download VPN rule-set failed: %s", resp.Status)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0750); err != nil {
+		return err
+	}
+	tmpPath := targetPath + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(file, resp.Body)
+	closeErr := file.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return closeErr
+	}
+	return os.Rename(tmpPath, targetPath)
+}
+
+func cleanupVPNRuleSet(rulesDir string) error {
+	rulesDir = strings.TrimSpace(rulesDir)
+	if rulesDir == "" {
+		return errors.New("VPN rules directory is required")
+	}
+	if !isSafeVPNRuleSetDir(rulesDir) {
+		return fmt.Errorf("refusing to remove unsafe VPN rules directory %q", rulesDir)
+	}
+	return os.RemoveAll(rulesDir)
+}
+
+func isSafeVPNRuleSetDir(rulesDir string) bool {
+	if filepath.Base(rulesDir) != "rules" {
+		return false
+	}
+	root, err := filepath.Abs(filepath.Join(os.TempDir(), "nezha-agent-vpn", "sessions"))
+	if err != nil {
+		return false
+	}
+	target, err := filepath.Abs(rulesDir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
 }
 
 func (m *AgentVPNManager) Get(sessionID string) (*AgentVPNSession, bool) {
@@ -1192,6 +1390,10 @@ func handleVPNControlTask(task *pb.Task, result *pb.TaskResult) {
 		payload, err = vpnManager.Stop(req)
 	case model.VPNActionCleanup:
 		payload, err = vpnManager.Cleanup(req)
+	case model.VPNActionRulesPrepare:
+		payload, err = vpnManager.PrepareRules(req)
+	case model.VPNActionRulesCleanup:
+		payload, err = vpnManager.CleanupRules(req)
 	case model.VPNActionStatus, model.VPNActionLogs:
 		payload, err = vpnManager.Status(req)
 	case model.VPNActionRestart:
@@ -1256,7 +1458,9 @@ func vpnControlActionKnown(action string) bool {
 		model.VPNActionRestart,
 		model.VPNActionStatus,
 		model.VPNActionLogs,
-		model.VPNActionCleanup:
+		model.VPNActionCleanup,
+		model.VPNActionRulesPrepare,
+		model.VPNActionRulesCleanup:
 		return true
 	default:
 		return false

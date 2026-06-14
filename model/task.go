@@ -43,13 +43,15 @@ type TaskFM struct {
 }
 
 const (
-	VPNActionPrepare = "prepare"
-	VPNActionStart   = "start"
-	VPNActionStop    = "stop"
-	VPNActionRestart = "restart"
-	VPNActionStatus  = "status"
-	VPNActionLogs    = "logs"
-	VPNActionCleanup = "cleanup"
+	VPNActionPrepare      = "prepare"
+	VPNActionStart        = "start"
+	VPNActionStop         = "stop"
+	VPNActionRestart      = "restart"
+	VPNActionStatus       = "status"
+	VPNActionLogs         = "logs"
+	VPNActionCleanup      = "cleanup"
+	VPNActionRulesPrepare = "rules_prepare"
+	VPNActionRulesCleanup = "rules_cleanup"
 )
 
 const (
