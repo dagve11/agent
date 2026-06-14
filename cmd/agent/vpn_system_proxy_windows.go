@@ -46,12 +46,6 @@ func (m *windowsVPNSystemProxyManager) Apply(httpAddr string, socksAddr string) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.applied {
-		m.proxyEnable = readWindowsRegistryValue("ProxyEnable")
-		m.proxyServer = readWindowsRegistryValue("ProxyServer")
-		m.proxyOverride = readWindowsRegistryValue("ProxyOverride")
-	}
-
 	proxyServer := buildWindowsProxyServer(httpAddr, socksAddr)
 	if proxyServer == "" {
 		return fmt.Errorf("system proxy requires http or socks listen address")
