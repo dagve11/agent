@@ -125,6 +125,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	if err := m.preflightTun(req); err != nil {
 		return vpnFailedResult(req, err), err
 	}
+	ensureVPNRuntimeControlExtra(&req)
 	cleanupLogs, err := m.stopExistingSessionBeforeStart(req.SessionID)
 	if err != nil {
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
@@ -1388,6 +1389,8 @@ func handleVPNControlTask(task *pb.Task, result *pb.TaskResult) {
 		payload, err = vpnManager.Start(req)
 	case model.VPNActionStop:
 		payload, err = vpnManager.Stop(req)
+	case model.VPNActionControl:
+		payload, err = vpnManager.Control(req)
 	case model.VPNActionCleanup:
 		payload, err = vpnManager.Cleanup(req)
 	case model.VPNActionRulesPrepare:
@@ -1456,6 +1459,7 @@ func vpnControlActionKnown(action string) bool {
 		model.VPNActionStart,
 		model.VPNActionStop,
 		model.VPNActionRestart,
+		model.VPNActionControl,
 		model.VPNActionStatus,
 		model.VPNActionLogs,
 		model.VPNActionCleanup,

@@ -22,6 +22,9 @@ const (
 	vpnOutboundExit          = "vpn-exit"
 	vpnOutboundDirect        = "direct"
 	vpnOutboundBlock         = "block"
+	vpnOutboundModeSelector  = "vpn-mode"
+	vpnOutboundRuleMatch     = "vpn-rule-match"
+	vpnOutboundRuleDirect    = "vpn-rule-direct"
 	vpnInboundLocalHTTP      = "local-http"
 	vpnInboundLocalSOCKS     = "local-socks"
 	vpnInboundRelay          = "relay-in"
@@ -78,29 +81,53 @@ func buildVPNEntrySingBoxConfig(req model.VPNControlRequest) (map[string]any, er
 		"log": map[string]any{
 			"level": vpnSingBoxConfigLogLevel,
 		},
-		"inbounds": inbounds,
-		"outbounds": []map[string]any{
-			{
-				"type":        "socks",
-				"tag":         vpnOutboundExit,
-				"server":      bridgeHost,
-				"server_port": bridgePort,
+		"inbounds":  inbounds,
+		"outbounds": buildVPNEntryOutbounds(req, bridgeHost, bridgePort),
+		"route":     buildVPNEntryRoute(req),
+	}
+	if runtimeAPI := vpnRuntimeControlAddress(req); runtimeAPI != "" {
+		cfg["experimental"] = map[string]any{
+			"clash_api": map[string]any{
+				"external_controller": runtimeAPI,
 			},
-			{
-				"type": "direct",
-				"tag":  vpnOutboundDirect,
-			},
-			{
-				"type": "block",
-				"tag":  vpnOutboundBlock,
-			},
-		},
-		"route": buildVPNEntryRoute(req),
+		}
 	}
 	if isVPNTunMode(req.Mode) {
 		cfg["dns"] = buildVPNTunDNS(req)
 	}
 	return cfg, nil
+}
+
+func buildVPNEntryOutbounds(req model.VPNControlRequest, bridgeHost string, bridgePort int) []map[string]any {
+	finalOutbound, ruleMatchOutbound, ruleDirectOutbound := vpnSelectorOutboundsForRuleMode(req)
+	return []map[string]any{
+		{
+			"type":        "socks",
+			"tag":         vpnOutboundExit,
+			"server":      bridgeHost,
+			"server_port": bridgePort,
+		},
+		{
+			"type": "direct",
+			"tag":  vpnOutboundDirect,
+		},
+		{
+			"type": "block",
+			"tag":  vpnOutboundBlock,
+		},
+		buildVPNSelectorOutbound(vpnOutboundModeSelector, finalOutbound),
+		buildVPNSelectorOutbound(vpnOutboundRuleMatch, ruleMatchOutbound),
+		buildVPNSelectorOutbound(vpnOutboundRuleDirect, ruleDirectOutbound),
+	}
+}
+
+func buildVPNSelectorOutbound(tag string, selected string) map[string]any {
+	return map[string]any{
+		"type":      "selector",
+		"tag":       tag,
+		"outbounds": []string{vpnOutboundExit, vpnOutboundDirect},
+		"default":   selected,
+	}
 }
 
 func buildVPNEntryInbounds(req model.VPNControlRequest) ([]map[string]any, error) {
@@ -190,52 +217,34 @@ func buildVPNEntryRoute(req model.VPNControlRequest) map[string]any {
 		rules = append(rules, blockRule)
 	}
 
-	ruleMode := req.Rules.Mode
-	if ruleMode == "" && req.Mode == model.VPNModeTunGlobal {
-		ruleMode = model.VPNRuleModeGlobal
+	if domains := cleanStrings(req.Rules.Domains); len(domains) > 0 {
+		rules = append(rules, map[string]any{
+			"domain":   domains,
+			"outbound": vpnOutboundRuleMatch,
+		})
 	}
-	switch ruleMode {
-	case model.VPNRuleModeGlobal:
-		return buildVPNRoute(rules, vpnOutboundExit, nil)
-	case model.VPNRuleModeDirect:
-		return buildVPNRoute(rules, vpnOutboundDirect, nil)
-	case model.VPNRuleModeIP:
-		if cidrs := cleanStrings(req.Rules.CIDRs); len(cidrs) > 0 {
-			rules = append(rules, map[string]any{
-				"ip_cidr":  cidrs,
-				"outbound": vpnOutboundExit,
-			})
-		}
-	default:
-		if domains := cleanStrings(req.Rules.Domains); len(domains) > 0 {
-			rules = append(rules, map[string]any{
-				"domain":   domains,
-				"outbound": vpnOutboundExit,
-			})
-		}
-		if cidrs := cleanStrings(req.Rules.CIDRs); len(cidrs) > 0 {
-			rules = append(rules, map[string]any{
-				"ip_cidr":  cidrs,
-				"outbound": vpnOutboundExit,
-			})
-		}
+	if cidrs := cleanStrings(req.Rules.CIDRs); len(cidrs) > 0 {
+		rules = append(rules, map[string]any{
+			"ip_cidr":  cidrs,
+			"outbound": vpnOutboundRuleMatch,
+		})
 	}
 
 	if ruleSets, ok := activeVPNRuleSetRouteItems(req); ok {
 		rules = append(rules,
 			map[string]any{
 				"rule_set": vpnRuleSetGeositeCN,
-				"outbound": vpnOutboundDirect,
+				"outbound": vpnOutboundRuleDirect,
 			},
 			map[string]any{
 				"rule_set": vpnRuleSetGeoIPCN,
-				"outbound": vpnOutboundDirect,
+				"outbound": vpnOutboundRuleDirect,
 			},
 		)
-		return buildVPNRoute(rules, vpnOutboundExit, ruleSets)
+		return buildVPNRoute(rules, vpnOutboundModeSelector, ruleSets)
 	}
 
-	return buildVPNRoute(rules, vpnOutboundDirect, nil)
+	return buildVPNRoute(rules, vpnOutboundModeSelector, nil)
 }
 
 func buildVPNRoute(rules []map[string]any, final string, ruleSets []map[string]any) map[string]any {
