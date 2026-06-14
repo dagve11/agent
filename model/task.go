@@ -74,6 +74,7 @@ const (
 	VPNRuleModeGlobal = "global"
 	VPNRuleModeDomain = "domain"
 	VPNRuleModeIP     = "ip"
+	VPNRuleModeDirect = "direct"
 )
 
 const (

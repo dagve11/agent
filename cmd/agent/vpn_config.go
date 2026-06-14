@@ -197,6 +197,8 @@ func buildVPNEntryRoute(req model.VPNControlRequest) map[string]any {
 	switch ruleMode {
 	case model.VPNRuleModeGlobal:
 		return buildVPNRoute(rules, vpnOutboundExit, nil)
+	case model.VPNRuleModeDirect:
+		return buildVPNRoute(rules, vpnOutboundDirect, nil)
 	case model.VPNRuleModeIP:
 		if cidrs := cleanStrings(req.Rules.CIDRs); len(cidrs) > 0 {
 			rules = append(rules, map[string]any{
@@ -291,6 +293,19 @@ func vpnRuleSetDirFromRequest(req model.VPNControlRequest) string {
 }
 
 func buildVPNTunDNS(req model.VPNControlRequest) map[string]any {
+	if req.Rules.Mode == model.VPNRuleModeDirect {
+		return map[string]any{
+			"servers": []map[string]any{
+				{
+					"tag":     "direct",
+					"address": "local",
+					"detour":  vpnOutboundDirect,
+				},
+			},
+			"final": "direct",
+		}
+	}
+
 	server := strings.TrimSpace(req.DNSServer)
 	if server == "" {
 		server = defaultVPNTunDNSServer
