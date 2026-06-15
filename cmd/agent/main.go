@@ -215,6 +215,7 @@ func preRun(configPath string) error {
 
 	monitor.InitConfig(&agentConfig)
 	monitor.CustomEndpoints = agentConfig.CustomIPApi
+	initAgentVPNDirect()
 
 	return nil
 }

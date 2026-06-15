@@ -76,6 +76,10 @@ type Host struct {
 	VPNAllowTun         bool
 	VPNCoreVersion      string
 	VPNLastError        string
+	VPNDirectEnabled    bool
+	VPNDirectListenPort uint32
+	VPNDirectAdvertise  string
+	VPNDirectCertSHA256 string
 }
 
 func (h *Host) PB() *pb.Host {
@@ -96,6 +100,10 @@ func (h *Host) PB() *pb.Host {
 		VpnAllowTun:         h.VPNAllowTun,
 		VpnCoreVersion:      h.VPNCoreVersion,
 		VpnLastError:        h.VPNLastError,
+		VpnDirectEnabled:    h.VPNDirectEnabled,
+		VpnDirectListenPort: h.VPNDirectListenPort,
+		VpnDirectAdvertise:  h.VPNDirectAdvertise,
+		VpnDirectCertSha256: h.VPNDirectCertSHA256,
 	}
 }
 

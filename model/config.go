@@ -43,15 +43,21 @@ type AgentConfig struct {
 	DisableVPN                  bool            `koanf:"disable_vpn" json:"disable_vpn"`                         // 关闭 Agent VPN
 	VPNAllowSystemProxy         bool            `koanf:"vpn_allow_system_proxy" json:"vpn_allow_system_proxy"`   // 允许 Agent VPN 系统代理模式
 	VPNAllowTun                 bool            `koanf:"vpn_allow_tun" json:"vpn_allow_tun"`                     // 允许 Agent VPN TUN 模式
-	VPNStateDir                 string          `koanf:"vpn_state_dir" json:"vpn_state_dir,omitempty"`           // Agent VPN 状态目录
-	VPNCoreDir                  string          `koanf:"vpn_core_dir" json:"vpn_core_dir,omitempty"`             // Agent VPN 核心程序目录
-	DisableSendQuery            bool            `koanf:"disable_send_query" json:"disable_send_query"`           // 关闭发送TCP/ICMP/HTTP请求
-	IPReportPeriod              uint32          `koanf:"ip_report_period" json:"ip_report_period"`               // IP上报周期
-	SelfUpdatePeriod            uint32          `koanf:"self_update_period" json:"self_update_period"`           // 自动更新周期
-	CustomIPApi                 []string        `koanf:"custom_ip_api" json:"custom_ip_api,omitempty"`           // 自定义 IP API                      // 重载间隔
+	VPNDirectEnabled            bool            `koanf:"vpn_direct_enabled" json:"vpn_direct_enabled"`           // 允许 Agent VPN 直连数据面
+	VPNDirectListen             string          `koanf:"vpn_direct_listen" json:"vpn_direct_listen,omitempty"`   // Agent VPN 直连监听地址
+	VPNDirectAdvertise          string          `koanf:"vpn_direct_advertise" json:"vpn_direct_advertise,omitempty"`
+	VPNStateDir                 string          `koanf:"vpn_state_dir" json:"vpn_state_dir,omitempty"` // Agent VPN 状态目录
+	VPNCoreDir                  string          `koanf:"vpn_core_dir" json:"vpn_core_dir,omitempty"`   // Agent VPN 核心程序目录
+	DisableSendQuery            bool            `koanf:"disable_send_query" json:"disable_send_query"` // 关闭发送TCP/ICMP/HTTP请求
+	IPReportPeriod              uint32          `koanf:"ip_report_period" json:"ip_report_period"`     // IP上报周期
+	SelfUpdatePeriod            uint32          `koanf:"self_update_period" json:"self_update_period"` // 自动更新周期
+	CustomIPApi                 []string        `koanf:"custom_ip_api" json:"custom_ip_api,omitempty"` // 自定义 IP API                      // 重载间隔
 
 	k        *koanf.Koanf `json:"-"`
 	filePath string       `json:"-"`
+
+	VPNDirectListenPort uint32 `koanf:"-" json:"-"`
+	VPNDirectCertSHA256 string `koanf:"-" json:"-"`
 }
 
 // Read 从给定的文件目录加载配置文件
@@ -131,6 +137,14 @@ func ValidateConfig(c *AgentConfig, isRemoteEdit bool) error {
 	}
 	if !c.DisableVPN && !c.VPNAllowSystemProxy && !c.VPNAllowTun {
 		c.VPNAllowSystemProxy = true
+	}
+	if !c.DisableVPN {
+		if strings.TrimSpace(c.VPNDirectListen) == "" {
+			c.VPNDirectListen = ":8090"
+		}
+		if c.k == nil || !c.k.Exists("vpn_direct_enabled") {
+			c.VPNDirectEnabled = true
+		}
 	}
 
 	if c.ReportDelay < 1 || c.ReportDelay > 4 {

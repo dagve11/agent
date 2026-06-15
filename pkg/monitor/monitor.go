@@ -128,6 +128,10 @@ func GetHost() *model.Host {
 		ret.VPNAllowSystemProxy = cfg.VPNAllowSystemProxy
 		ret.VPNAllowTun = cfg.VPNAllowTun
 		ret.VPNCoreVersion = Version
+		ret.VPNDirectEnabled = cfg.VPNDirectEnabled
+		ret.VPNDirectListenPort = cfg.VPNDirectListenPort
+		ret.VPNDirectAdvertise = cfg.VPNDirectAdvertise
+		ret.VPNDirectCertSHA256 = cfg.VPNDirectCertSHA256
 	}
 
 	return &ret

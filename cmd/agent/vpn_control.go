@@ -43,6 +43,7 @@ type AgentVPNManager struct {
 	ioStreamFactory    func(context.Context) (vpnIOStream, error)
 	sidecarRunner      vpnSidecarRunner
 	httpClient         vpnHTTPClient
+	directRelay        *AgentVPNDirectManager
 	taskResultSender   func(*pb.TaskResult) error
 	systemProxyManager vpnSystemProxyManager
 	tunManager         vpnTunManager
@@ -70,6 +71,7 @@ func NewAgentVPNManager() *AgentVPNManager {
 		ioStreamFactory:    defaultVPNIOStreamFactory,
 		sidecarRunner:      defaultVPNSidecarRunner,
 		httpClient:         httpClient,
+		directRelay:        defaultAgentVPNDirectManager,
 		systemProxyManager: defaultVPNSystemProxyManager(),
 		tunManager:         defaultVPNTunManager(),
 		tunHealthProbe:     defaultVPNTunHealthProbe,
@@ -158,7 +160,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
 	}
 	session.CorePath = corePath
-	relay, err := m.attachDashboardRelay(req)
+	relay, err := m.attachVPNRelay(req)
 	if err != nil {
 		cleanupLogs := m.restoreSessionTunForStartupFailure(session)
 		sessionCancel()
@@ -245,6 +247,9 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	m.mu.Unlock()
 	m.watchSidecar(req.SessionID, sidecar)
 	m.watchSidecarLogs(sessionCtx, req.SessionID, session.LogPath)
+	if req.RelayMode == model.VPNRelayModeDirect && req.Role == model.VPNRoleEntry {
+		m.watchDirectTraffic(sessionCtx, req.SessionID)
+	}
 
 	return model.VPNControlResult{
 		SessionID:          req.SessionID,
@@ -513,10 +518,27 @@ func (m *AgentVPNManager) StopAll(reason string) {
 	}
 }
 
-func (m *AgentVPNManager) attachDashboardRelay(req model.VPNControlRequest) (vpnIOStream, error) {
-	if req.RelayMode != "" && req.RelayMode != model.VPNRelayModeDashboard {
+func (m *AgentVPNManager) attachVPNRelay(req model.VPNControlRequest) (vpnIOStream, error) {
+	switch strings.TrimSpace(req.RelayMode) {
+	case "", model.VPNRelayModeDashboard:
+		return m.attachDashboardRelay(req)
+	case model.VPNRelayModeDirect:
+		if m.directRelay == nil {
+			return nil, errors.New("VPN direct relay is unavailable")
+		}
+		if req.Role == model.VPNRoleExit {
+			return m.directRelay.Register(req)
+		}
+		if req.Role == model.VPNRoleEntry {
+			return m.directRelay.Dial(context.Background(), req)
+		}
+		return nil, fmt.Errorf("unsupported VPN role %q", req.Role)
+	default:
 		return nil, fmt.Errorf("unsupported VPN relay mode %q", req.RelayMode)
 	}
+}
+
+func (m *AgentVPNManager) attachDashboardRelay(req model.VPNControlRequest) (vpnIOStream, error) {
 	stream, err := m.ioStreamFactory(context.Background())
 	if err != nil {
 		return nil, err
@@ -574,6 +596,7 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 		LastError:          session.LastError,
 		StartedAtUnix:      session.StartedAt.Unix(),
 	}
+	attachVPNBridgeStats(&payload, session.bridge)
 	payload.Logs = readVPNLogTail(session.LogPath, 200)
 	m.attachStatusFileState(&payload, req, session)
 	return payload, nil
@@ -1396,6 +1419,83 @@ func (m *AgentVPNManager) sendSidecarLogLines(sessionID string, lines []string) 
 	}
 }
 
+func (m *AgentVPNManager) watchDirectTraffic(ctx context.Context, sessionID string) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		var lastUpload uint64
+		var lastDownload uint64
+		var lastActive uint32
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				upload, download, active, sent := m.sendDirectTrafficStatus(sessionID, lastUpload, lastDownload, lastActive)
+				if sent {
+					lastUpload, lastDownload, lastActive = upload, download, active
+				}
+			}
+		}
+	}()
+}
+
+func (m *AgentVPNManager) sendDirectTrafficStatus(sessionID string, lastUpload uint64, lastDownload uint64, lastActive uint32) (uint64, uint64, uint32, bool) {
+	m.mu.Lock()
+	session := m.sessions[sessionID]
+	send := m.taskResultSender
+	m.mu.Unlock()
+	if session == nil || send == nil || session.Request.RelayMode != model.VPNRelayModeDirect || session.Request.Role != model.VPNRoleEntry {
+		return lastUpload, lastDownload, lastActive, false
+	}
+	upload, download, active := vpnBridgeStatsSnapshot(session.bridge)
+	if upload == lastUpload && download == lastDownload && active == lastActive {
+		return lastUpload, lastDownload, lastActive, false
+	}
+	payload := model.VPNControlResult{
+		SessionID:       session.Request.SessionID,
+		Action:          model.VPNActionStatus,
+		Role:            session.Request.Role,
+		State:           session.State,
+		TrafficReported: true,
+		UploadBytes:     upload,
+		DownloadBytes:   download,
+		ActiveConns:     active,
+		StartedAtUnix:   session.StartedAt.Unix(),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return lastUpload, lastDownload, lastActive, false
+	}
+	if err := send(&pb.TaskResult{
+		Type:       model.TaskTypeVPNControl,
+		Successful: true,
+		Data:       string(data),
+	}); err != nil {
+		printf("VPN direct traffic result send failed: %v", err)
+		return lastUpload, lastDownload, lastActive, false
+	}
+	return upload, download, active, true
+}
+
+func attachVPNBridgeStats(payload *model.VPNControlResult, bridge *AgentVPNBridge) {
+	if payload == nil {
+		return
+	}
+	if bridge == nil || bridge.stats == nil {
+		return
+	}
+	payload.TrafficReported = true
+	payload.UploadBytes, payload.DownloadBytes, payload.ActiveConns = vpnBridgeStatsSnapshot(bridge)
+}
+
+func vpnBridgeStatsSnapshot(bridge *AgentVPNBridge) (uint64, uint64, uint32) {
+	if bridge == nil || bridge.stats == nil {
+		return 0, 0, 0
+	}
+	return bridge.stats.Snapshot()
+}
+
 func readVPNLogLinesSince(path string, offset int64) ([]string, int64) {
 	if strings.TrimSpace(path) == "" {
 		return nil, offset
@@ -1577,7 +1677,7 @@ func validateVPNControlRequest(req model.VPNControlRequest) error {
 	if strings.TrimSpace(req.RelayMode) == "" {
 		return errors.New("relay_mode is required")
 	}
-	if req.RelayMode != model.VPNRelayModeDashboard {
+	if req.RelayMode != model.VPNRelayModeDashboard && req.RelayMode != model.VPNRelayModeDirect {
 		return fmt.Errorf("unsupported VPN relay mode %q", req.RelayMode)
 	}
 	if !vpnControlActionKnown(req.Action) {
