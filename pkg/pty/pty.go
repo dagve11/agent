@@ -36,7 +36,12 @@ func Start() (IPty, error) {
 		return nil, errors.New("没有可用终端")
 	}
 	cmd := loginShellCommand(shellPath)
-	cmd.Env = append(os.Environ(), "TERM=xterm")
+	// 确保使用 UTF-8 编码支持中文输入输出
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color",  // 支持 256 色和更多终端特性
+		"LANG=en_US.UTF-8",     // UTF-8 locale
+		"LC_ALL=en_US.UTF-8",   // 强制所有分类使用 UTF-8
+	)
 	tty, err := opty.Start(cmd)
 	return &Pty{tty: tty, cmd: cmd}, err
 }
