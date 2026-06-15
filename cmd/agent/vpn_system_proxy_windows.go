@@ -178,30 +178,46 @@ func applyWindowsProxyToKey(key string, proxyServer string) error {
 	return setWindowsRegistryString(key, winProxyOverrideValue, winProxyOverrideLocal)
 }
 
-func platformVPNSystemProxyApplied(httpAddr string, socksAddr string) (bool, string, error) {
+func platformVPNSystemProxyStatus(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
 	proxyServer := buildWindowsProxyServer(httpAddr, socksAddr)
 	if proxyServer == "" {
-		return false, "", fmt.Errorf("system proxy requires http or socks listen address")
+		return vpnSystemProxyInspection{}, fmt.Errorf("system proxy requires http or socks listen address")
 	}
 	targets, err := windowsProxyTargetKeys()
 	if err != nil {
-		return false, "", err
+		return vpnSystemProxyInspection{}, err
 	}
 	if len(targets) == 0 {
-		return false, "", errors.New("no Windows user registry hive found for system proxy")
+		return vpnSystemProxyInspection{}, errors.New("no Windows user registry hive found for system proxy")
 	}
 	matched := 0
+	enabled := 0
+	servers := make([]string, 0, len(targets))
 	for _, key := range targets {
-		if windowsProxyKeyApplied(key, proxyServer, httpAddr, socksAddr) {
+		proxyEnabled := windowsRegistryDWORDEnabled(readWindowsRegistryValue(key, winProxyEnableValue))
+		proxyServerValue := readWindowsRegistryValue(key, winProxyServerValue)
+		if proxyEnabled {
+			enabled++
+		}
+		if proxyServerValue != nil && strings.TrimSpace(*proxyServerValue) != "" {
+			servers = append(servers, strings.TrimSpace(*proxyServerValue))
+		}
+		if proxyEnabled && windowsProxyServerApplied(proxyServerValue, proxyServer, httpAddr, socksAddr) {
 			matched++
 		}
 	}
-	return matched == len(targets), fmt.Sprintf("targets=%d matched=%d", len(targets), matched), nil
-}
-
-func windowsProxyKeyApplied(key string, proxyServer string, httpAddr string, socksAddr string) bool {
-	return windowsRegistryDWORDEnabled(readWindowsRegistryValue(key, winProxyEnableValue)) &&
-		windowsProxyServerApplied(readWindowsRegistryValue(key, winProxyServerValue), proxyServer, httpAddr, socksAddr)
+	status := "overridden"
+	if matched == len(targets) {
+		status = "applied"
+	} else if enabled == 0 {
+		status = "disabled"
+	}
+	return vpnSystemProxyInspection{
+		Applied:  status == "applied",
+		Status:   status,
+		Current:  fmt.Sprintf("targets=%d matched=%d enabled=%d server=%s", len(targets), matched, enabled, emptyVPNStatusValue(strings.Join(cleanStrings(servers), "|"))),
+		Expected: proxyServer,
+	}, nil
 }
 
 func windowsRegistryDWORDEnabled(value *string) bool {

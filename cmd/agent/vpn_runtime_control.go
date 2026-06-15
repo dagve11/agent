@@ -206,6 +206,89 @@ func setSingBoxSelector(ctx context.Context, apiAddr string, selector string, ou
 	return fmt.Errorf("sing-box API returned %s: %s", response.Status, strings.TrimSpace(string(raw)))
 }
 
+func inspectVPNRuntimeRuleStatus(req model.VPNControlRequest, session *AgentVPNSession) (string, string, string) {
+	if req.Role != model.VPNRoleEntry {
+		return "", "", ""
+	}
+	if session == nil || session.State != model.VPNStateRunning {
+		return "inactive", "unknown", "[runtime] status=inactive rule_mode=unknown"
+	}
+	addr := vpnRuntimeControlAddress(req)
+	if addr == "" {
+		return "unknown", "unknown", "[runtime] status=unknown rule_mode=unknown error=runtime_api_missing"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	finalOutbound, err := getSingBoxSelectorNow(ctx, addr, vpnOutboundModeSelector)
+	if err != nil {
+		return "unknown", "unknown", "[runtime] status=unknown rule_mode=unknown error=" + err.Error()
+	}
+	ruleMatchOutbound, err := getSingBoxSelectorNow(ctx, addr, vpnOutboundRuleMatch)
+	if err != nil {
+		return "unknown", "unknown", "[runtime] status=unknown rule_mode=unknown error=" + err.Error()
+	}
+	ruleDirectOutbound, err := getSingBoxSelectorNow(ctx, addr, vpnOutboundRuleDirect)
+	if err != nil {
+		return "unknown", "unknown", "[runtime] status=unknown rule_mode=unknown error=" + err.Error()
+	}
+	ruleMode := vpnRuleModeFromRuntimeSelectors(req, finalOutbound, ruleMatchOutbound, ruleDirectOutbound)
+	log := fmt.Sprintf("[runtime] status=available rule_mode=%s selectors=%s/%s/%s", ruleMode, finalOutbound, ruleMatchOutbound, ruleDirectOutbound)
+	return "available", ruleMode, log
+}
+
+func getSingBoxSelectorNow(ctx context.Context, apiAddr string, selector string) (string, error) {
+	endpoint := "http://" + strings.TrimSpace(apiAddr) + "/proxies/" + url.PathEscape(selector)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("sing-box API returned %s: %s", response.Status, strings.TrimSpace(string(raw)))
+	}
+	var payload struct {
+		Now  string `json:"now"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	now := strings.TrimSpace(payload.Now)
+	if now == "" {
+		now = strings.TrimSpace(payload.Name)
+	}
+	if now == "" {
+		return "", errors.New("sing-box selector response missing selected outbound")
+	}
+	return now, nil
+}
+
+func vpnRuleModeFromRuntimeSelectors(req model.VPNControlRequest, finalOutbound string, ruleMatchOutbound string, ruleDirectOutbound string) string {
+	finalOutbound = strings.TrimSpace(finalOutbound)
+	ruleMatchOutbound = strings.TrimSpace(ruleMatchOutbound)
+	ruleDirectOutbound = strings.TrimSpace(ruleDirectOutbound)
+	switch {
+	case finalOutbound == vpnOutboundExit && ruleMatchOutbound == vpnOutboundExit && ruleDirectOutbound == vpnOutboundExit:
+		return model.VPNRuleModeGlobal
+	case finalOutbound == vpnOutboundDirect && ruleMatchOutbound == vpnOutboundDirect && ruleDirectOutbound == vpnOutboundDirect:
+		return model.VPNRuleModeDirect
+	case ruleMatchOutbound == vpnOutboundExit && ruleDirectOutbound == vpnOutboundDirect:
+		switch vpnRuntimeRuleMode(req) {
+		case model.VPNRuleModeIP:
+			return model.VPNRuleModeIP
+		default:
+			return model.VPNRuleModeDomain
+		}
+	default:
+		return "custom"
+	}
+}
+
 func mergeVPNRuntimeControlRequest(current model.VPNControlRequest, next model.VPNControlRequest) model.VPNControlRequest {
 	merged := current
 	merged.Mode = normalizedVPNRuntimeMode(next.Mode)

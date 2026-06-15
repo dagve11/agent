@@ -205,3 +205,200 @@ func collectLinuxKDEProxyStates(readCommand string) ([]linuxKDEProxyState, error
 	}
 	return states, nil
 }
+
+func platformVPNSystemProxyStatus(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	backend, err := detectLinuxSystemProxyBackend()
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	switch backend.Name {
+	case "gsettings":
+		return inspectLinuxGSettingsProxyStatus(httpAddr, socksAddr)
+	case "kde":
+		return inspectLinuxKDEProxyStatus(backend, httpAddr, socksAddr)
+	case "environment":
+		return inspectLinuxEnvProxyStatus(backend, httpAddr, socksAddr)
+	default:
+		return vpnSystemProxyInspection{}, errors.New("unsupported linux system proxy backend")
+	}
+}
+
+func inspectLinuxGSettingsProxyStatus(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	states, err := collectLinuxGSettingsProxyStates()
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	values := linuxGSettingsProxyStateMap(states)
+	mode := linuxProxyUnquote(values["org.gnome.system.proxy/mode"])
+	httpExpected, socksExpected, hasHTTP, hasSOCKS, err := linuxExpectedProxyAddresses(httpAddr, socksAddr)
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	httpCurrent := linuxHostPort(values["org.gnome.system.proxy.http/host"], values["org.gnome.system.proxy.http/port"])
+	httpsCurrent := linuxHostPort(values["org.gnome.system.proxy.https/host"], values["org.gnome.system.proxy.https/port"])
+	socksCurrent := linuxHostPort(values["org.gnome.system.proxy.socks/host"], values["org.gnome.system.proxy.socks/port"])
+	current := "backend=gsettings mode=" + emptyVPNStatusValue(mode) + " http=" + emptyVPNStatusValue(httpCurrent) + " https=" + emptyVPNStatusValue(httpsCurrent) + " socks=" + emptyVPNStatusValue(socksCurrent)
+	if mode != "manual" {
+		return vpnSystemProxyInspection{Status: "disabled", Current: current, Expected: formatVPNSystemProxyExpected(httpAddr, socksAddr)}, nil
+	}
+	matched := true
+	if hasHTTP {
+		matched = linuxProxyAddressEqual(httpCurrent, httpExpected) && linuxProxyAddressEqual(httpsCurrent, httpExpected)
+	}
+	if hasSOCKS {
+		matched = matched && linuxProxyAddressEqual(socksCurrent, socksExpected)
+	}
+	status := "overridden"
+	if matched {
+		status = "applied"
+	}
+	return vpnSystemProxyInspection{Applied: status == "applied", Status: status, Current: current, Expected: formatVPNSystemProxyExpected(httpAddr, socksAddr)}, nil
+}
+
+func inspectLinuxKDEProxyStatus(backend linuxSystemProxyBackend, httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	states, err := collectLinuxKDEProxyStates(backend.ReadCommand)
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	values := linuxKDEProxyStateMap(states)
+	httpExpected, socksExpected, hasSOCKS, err := linuxExpectedProxyURLs(httpAddr, socksAddr, "socks")
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	hasHTTP := strings.TrimSpace(httpExpected) != ""
+	current := "backend=kde type=" + emptyVPNStatusValue(values["ProxyType"]) + " http=" + emptyVPNStatusValue(values["httpProxy"]) + " https=" + emptyVPNStatusValue(values["httpsProxy"]) + " socks=" + emptyVPNStatusValue(values["socksProxy"])
+	if strings.TrimSpace(values["ProxyType"]) != "1" {
+		return vpnSystemProxyInspection{Status: "disabled", Current: current, Expected: formatVPNSystemProxyExpected(httpAddr, socksAddr)}, nil
+	}
+	matched := true
+	if hasHTTP {
+		matched = linuxProxyAddressEqual(values["httpProxy"], httpExpected) && linuxProxyAddressEqual(values["httpsProxy"], httpExpected)
+	}
+	if hasSOCKS {
+		matched = matched && linuxProxyAddressEqual(values["socksProxy"], socksExpected)
+	}
+	status := "overridden"
+	if matched {
+		status = "applied"
+	}
+	return vpnSystemProxyInspection{Applied: status == "applied", Status: status, Current: current, Expected: formatVPNSystemProxyExpected(httpAddr, socksAddr)}, nil
+}
+
+func inspectLinuxEnvProxyStatus(backend linuxSystemProxyBackend, httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	states, err := collectLinuxEnvProxyStates(backend.ReadCommand)
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	currentValues := make(map[string]string, len(states))
+	enabled := 0
+	for _, state := range states {
+		currentValues[state.Name] = state.Value
+		if state.Set && strings.TrimSpace(state.Value) != "" {
+			enabled++
+		}
+	}
+	expectedAssignments, err := buildLinuxEnvProxyAssignments(httpAddr, socksAddr)
+	if err != nil {
+		return vpnSystemProxyInspection{}, err
+	}
+	expectedValues := parseLinuxEnvProxyEnvironment(strings.Join(expectedAssignments, "\n"))
+	matched := true
+	for name, expected := range expectedValues {
+		if strings.TrimSpace(expected) == "" {
+			continue
+		}
+		if !linuxProxyAddressEqual(currentValues[name], expected) {
+			matched = false
+			break
+		}
+	}
+	current := "backend=environment http=" + emptyVPNStatusValue(currentValues["http_proxy"]) + " https=" + emptyVPNStatusValue(currentValues["https_proxy"]) + " all=" + emptyVPNStatusValue(currentValues["all_proxy"])
+	status := "overridden"
+	if matched {
+		status = "applied"
+	} else if enabled == 0 {
+		status = "disabled"
+	}
+	return vpnSystemProxyInspection{Applied: status == "applied", Status: status, Current: current, Expected: formatVPNSystemProxyExpected(httpAddr, socksAddr)}, nil
+}
+
+func linuxGSettingsProxyStateMap(states []linuxGSettingsProxyState) map[string]string {
+	values := make(map[string]string, len(states))
+	for _, state := range states {
+		values[state.Schema+"/"+state.Key] = strings.TrimSpace(state.Raw)
+	}
+	return values
+}
+
+func linuxKDEProxyStateMap(states []linuxKDEProxyState) map[string]string {
+	values := make(map[string]string, len(states))
+	for _, state := range states {
+		values[strings.TrimSpace(state.Key)] = strings.TrimSpace(state.Raw)
+	}
+	return values
+}
+
+func linuxExpectedProxyAddresses(httpAddr string, socksAddr string) (string, string, bool, bool, error) {
+	httpHost, httpPort, hasHTTP, err := linuxSplitProxyListen(httpAddr)
+	if err != nil {
+		return "", "", false, false, err
+	}
+	socksHost, socksPort, hasSOCKS, err := linuxSplitProxyListen(socksAddr)
+	if err != nil {
+		return "", "", false, false, err
+	}
+	if !hasHTTP && !hasSOCKS {
+		return "", "", false, false, errors.New("system proxy requires http or socks listen address")
+	}
+	httpExpected := ""
+	if hasHTTP {
+		httpExpected = httpHost + ":" + httpPort
+	}
+	socksExpected := ""
+	if hasSOCKS {
+		socksExpected = socksHost + ":" + socksPort
+	}
+	return httpExpected, socksExpected, hasHTTP, hasSOCKS, nil
+}
+
+func linuxExpectedProxyURLs(httpAddr string, socksAddr string, socksScheme string) (string, string, bool, error) {
+	httpExpected, socksExpected, _, hasSOCKS, err := linuxExpectedProxyAddresses(httpAddr, socksAddr)
+	if err != nil {
+		return "", "", false, err
+	}
+	if httpExpected != "" {
+		httpExpected = "http://" + httpExpected
+	}
+	if socksExpected != "" {
+		socksExpected = socksScheme + "://" + socksExpected
+	}
+	return httpExpected, socksExpected, hasSOCKS, nil
+}
+
+func linuxHostPort(hostRaw string, portRaw string) string {
+	host := linuxProxyUnquote(hostRaw)
+	port := linuxProxyUnquote(portRaw)
+	if host == "" || port == "" || port == "0" {
+		return ""
+	}
+	return host + ":" + port
+}
+
+func linuxProxyUnquote(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "'\"")
+	return strings.TrimSpace(value)
+}
+
+func linuxProxyAddressEqual(actual string, expected string) bool {
+	actual = strings.TrimSpace(actual)
+	expected = strings.TrimSpace(expected)
+	if strings.EqualFold(actual, expected) {
+		return true
+	}
+	actual = strings.TrimPrefix(strings.TrimPrefix(actual, "http://"), "socks://")
+	actual = strings.TrimPrefix(actual, "socks5://")
+	expected = strings.TrimPrefix(strings.TrimPrefix(expected, "http://"), "socks://")
+	expected = strings.TrimPrefix(expected, "socks5://")
+	return strings.EqualFold(actual, expected)
+}

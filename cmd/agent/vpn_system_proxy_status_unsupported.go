@@ -1,9 +1,9 @@
-//go:build !windows
+//go:build !windows && !darwin && !linux
 
 package main
 
 import "errors"
 
-func platformVPNSystemProxyApplied(string, string) (bool, string, error) {
-	return false, "", errors.New("system proxy status inspection is not supported on this platform")
+func platformVPNSystemProxyStatus(string, string) (vpnSystemProxyInspection, error) {
+	return vpnSystemProxyInspection{}, errors.New("system proxy status inspection is not supported on this platform")
 }

@@ -14,6 +14,14 @@ type vpnSystemProxyManager interface {
 	Restore() error
 }
 
+type vpnSystemProxyInspection struct {
+	Applied  bool
+	Status   string
+	Current  string
+	Expected string
+	Detail   string
+}
+
 type unsupportedVPNSystemProxyManager struct{}
 
 func defaultVPNSystemProxyManager() vpnSystemProxyManager {
@@ -43,26 +51,54 @@ func trackedVPNSystemProxyApplied(req model.VPNControlRequest, session *AgentVPN
 	return &applied
 }
 
-func inspectVPNSystemProxyApplied(req model.VPNControlRequest) (*bool, string) {
-	if req.Role != model.VPNRoleEntry || req.Mode != model.VPNModeSystemProxy {
-		return nil, ""
+func inspectVPNSystemProxyStatus(req model.VPNControlRequest) (vpnSystemProxyInspection, string) {
+	if req.Role != model.VPNRoleEntry {
+		return vpnSystemProxyInspection{}, ""
 	}
-	if !shouldApplyVPNSystemProxy(req) {
-		applied := false
-		return &applied, "[system_proxy] status=cleared"
+	if req.Mode != model.VPNModeSystemProxy {
+		return vpnSystemProxyInspection{Status: "inactive"}, "[system_proxy] status=inactive"
 	}
-	applied, detail, err := platformVPNSystemProxyApplied(req.ListenHTTP, req.ListenSOCKS)
+	inspection, err := platformVPNSystemProxyStatus(req.ListenHTTP, req.ListenSOCKS)
 	if err != nil {
-		return nil, "[system_proxy] status=unknown error=" + err.Error()
+		expected := formatVPNSystemProxyExpected(req.ListenHTTP, req.ListenSOCKS)
+		return vpnSystemProxyInspection{
+			Status:   "unknown",
+			Expected: expected,
+		}, "[system_proxy] status=unknown expected=" + emptyVPNStatusValue(expected) + " error=" + err.Error()
 	}
-	status := "drifted"
-	if applied {
-		status = "applied"
+	status := strings.TrimSpace(inspection.Status)
+	if status == "" {
+		if inspection.Applied {
+			status = "applied"
+		} else {
+			status = "overridden"
+		}
+		inspection.Status = status
 	}
-	if detail != "" {
-		detail = " " + detail
+	parts := []string{"[system_proxy] status=" + status}
+	if inspection.Current != "" {
+		parts = append(parts, "current="+inspection.Current)
 	}
-	return &applied, fmt.Sprintf("[system_proxy] status=%s%s", status, detail)
+	if inspection.Expected != "" {
+		parts = append(parts, "expected="+inspection.Expected)
+	}
+	if inspection.Detail != "" {
+		parts = append(parts, inspection.Detail)
+	}
+	return inspection, strings.Join(parts, " ")
+}
+
+func formatVPNSystemProxyExpected(httpAddr string, socksAddr string) string {
+	httpAddr = strings.TrimSpace(httpAddr)
+	socksAddr = strings.TrimSpace(socksAddr)
+	parts := make([]string, 0, 3)
+	if httpAddr != "" {
+		parts = append(parts, "http="+httpAddr, "https="+httpAddr)
+	}
+	if socksAddr != "" {
+		parts = append(parts, "socks="+socksAddr)
+	}
+	return strings.Join(parts, ";")
 }
 
 func vpnBoolExtra(values map[string]string, key string) bool {

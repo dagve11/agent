@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -583,8 +584,22 @@ func (m *AgentVPNManager) attachStatusFileState(payload *model.VPNControlResult,
 		return
 	}
 	payload.CheckID = strings.TrimSpace(req.Extra["status_check_id"])
+	statusReq := req
+	if session != nil {
+		statusReq = session.Request
+	}
+	if payload.LocalHTTP == "" {
+		payload.LocalHTTP = statusReq.ListenHTTP
+	}
+	if payload.LocalSOCKS == "" {
+		payload.LocalSOCKS = statusReq.ListenSOCKS
+	}
+	if payload.TunName == "" {
+		payload.TunName = statusReq.TunName
+	}
+	payload.ModeStatus = normalizedVPNRuntimeMode(statusReq.Mode)
 	coreError := ""
-	payload.CoreStatus, payload.CorePath, coreError = m.inspectVPNCoreStatus(req, session)
+	payload.CoreStatus, payload.CorePath, coreError = m.inspectVPNCoreStatus(statusReq, session)
 	if coreError != "" {
 		if payload.LastError != "" {
 			payload.LastError += "; " + coreError
@@ -593,32 +608,45 @@ func (m *AgentVPNManager) attachStatusFileState(payload *model.VPNControlResult,
 		}
 	}
 	if payload.CoreStatus == "ready" {
-		payload.CoreVersion = strings.TrimSpace(req.Core.Version)
+		payload.CoreVersion = strings.TrimSpace(statusReq.Core.Version)
 	}
 	rulesDetail := ""
-	payload.RulesStatus, payload.RulesPath, rulesDetail = m.inspectVPNRulesStatus(req)
+	payload.RulesStatus, payload.RulesPath, rulesDetail = m.inspectVPNRulesStatus(statusReq)
 	if payload.RulesStatus == "ready" {
 		payload.RulesVersion = rulesDetail
 	}
-	systemProxyApplied, systemProxyLog := inspectVPNSystemProxyApplied(req)
-	if systemProxyApplied != nil {
-		payload.SystemProxyApplied = systemProxyApplied
+	systemProxyStatus, systemProxyLog := inspectVPNSystemProxyStatus(statusReq)
+	if systemProxyStatus.Status != "" {
+		payload.SystemProxyStatus = systemProxyStatus.Status
+		payload.SystemProxyCurrent = systemProxyStatus.Current
+		payload.SystemProxyExpected = systemProxyStatus.Expected
+		applied := systemProxyStatus.Applied
+		payload.SystemProxyApplied = &applied
 	}
+	payload.TunStatus, payload.TunInterface = inspectVPNTunStatus(statusReq)
+	runtimeStatus, ruleModeStatus, runtimeLog := inspectVPNRuntimeRuleStatus(statusReq, session)
+	payload.RuntimeStatus = runtimeStatus
+	payload.RuleModeStatus = ruleModeStatus
 
 	logs := []string{
+		fmt.Sprintf("[mode] status=%s rule_mode=%s", emptyVPNStatusValue(payload.ModeStatus), emptyVPNStatusValue(payload.RuleModeStatus)),
 		fmt.Sprintf("[core] status=%s path=%s", payload.CoreStatus, emptyVPNStatusValue(payload.CorePath)),
 		fmt.Sprintf("[rules] status=%s path=%s", payload.RulesStatus, emptyVPNStatusValue(payload.RulesPath)),
+		fmt.Sprintf("[tun] status=%s interface=%s", emptyVPNStatusValue(payload.TunStatus), emptyVPNStatusValue(payload.TunInterface)),
 	}
 	if payload.CoreVersion != "" {
-		logs[0] += " version=" + payload.CoreVersion
+		logs[1] += " version=" + payload.CoreVersion
 	}
 	if coreError != "" {
-		logs[0] += " error=" + coreError
+		logs[1] += " error=" + coreError
 	}
 	if payload.RulesVersion != "" {
-		logs[1] += " version=" + payload.RulesVersion
+		logs[2] += " version=" + payload.RulesVersion
 	} else if rulesDetail != "" {
-		logs[1] += " detail=" + rulesDetail
+		logs[2] += " detail=" + rulesDetail
+	}
+	if runtimeLog != "" {
+		logs = append(logs, runtimeLog)
 	}
 	if systemProxyLog != "" {
 		logs = append(logs, systemProxyLog)
@@ -672,6 +700,30 @@ func (m *AgentVPNManager) inspectVPNRulesStatus(req model.VPNControlRequest) (st
 		return "missing", rulesDir, "missing=" + strings.Join(missing, ",")
 	}
 	return "ready", rulesDir, readVPNRulesManifestVersion(filepath.Join(rulesDir, "manifest.json"))
+}
+
+func inspectVPNTunStatus(req model.VPNControlRequest) (string, string) {
+	if req.Role != model.VPNRoleEntry || !isVPNTunMode(req.Mode) {
+		return "inactive", ""
+	}
+	tunName := strings.TrimSpace(req.TunName)
+	if tunName == "" {
+		tunName = "nezha-vpn"
+	}
+	iface, err := net.InterfaceByName(tunName)
+	if err == nil && iface != nil {
+		return "present", iface.Name
+	}
+	if err == nil {
+		return "missing", tunName
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "no such network interface") ||
+		strings.Contains(message, "no such device") ||
+		strings.Contains(message, "not found") {
+		return "missing", tunName
+	}
+	return "unknown", tunName
 }
 
 func (m *AgentVPNManager) effectiveRuleSetDir(req model.VPNControlRequest) string {
