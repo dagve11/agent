@@ -178,6 +178,59 @@ func applyWindowsProxyToKey(key string, proxyServer string) error {
 	return setWindowsRegistryString(key, winProxyOverrideValue, winProxyOverrideLocal)
 }
 
+func platformVPNSystemProxyApplied(httpAddr string, socksAddr string) (bool, string, error) {
+	proxyServer := buildWindowsProxyServer(httpAddr, socksAddr)
+	if proxyServer == "" {
+		return false, "", fmt.Errorf("system proxy requires http or socks listen address")
+	}
+	targets, err := windowsProxyTargetKeys()
+	if err != nil {
+		return false, "", err
+	}
+	if len(targets) == 0 {
+		return false, "", errors.New("no Windows user registry hive found for system proxy")
+	}
+	matched := 0
+	for _, key := range targets {
+		if windowsProxyKeyApplied(key, proxyServer, httpAddr, socksAddr) {
+			matched++
+		}
+	}
+	return matched == len(targets), fmt.Sprintf("targets=%d matched=%d", len(targets), matched), nil
+}
+
+func windowsProxyKeyApplied(key string, proxyServer string, httpAddr string, socksAddr string) bool {
+	return windowsRegistryDWORDEnabled(readWindowsRegistryValue(key, winProxyEnableValue)) &&
+		windowsProxyServerApplied(readWindowsRegistryValue(key, winProxyServerValue), proxyServer, httpAddr, socksAddr)
+}
+
+func windowsRegistryDWORDEnabled(value *string) bool {
+	if value == nil {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(*value))
+	return normalized == "1" || normalized == "0x1"
+}
+
+func windowsProxyServerApplied(value *string, proxyServer string, httpAddr string, socksAddr string) bool {
+	if value == nil {
+		return false
+	}
+	actual := strings.TrimSpace(*value)
+	if strings.EqualFold(actual, strings.TrimSpace(proxyServer)) {
+		return true
+	}
+	for _, addr := range []string{strings.TrimSpace(httpAddr), strings.TrimSpace(socksAddr)} {
+		if addr == "" {
+			continue
+		}
+		if strings.EqualFold(actual, addr) || strings.EqualFold(actual, "http://"+addr) {
+			return true
+		}
+	}
+	return false
+}
+
 func restoreWindowsProxySnapshots(snapshots []windowsProxySnapshot) error {
 	errs := make([]error, 0)
 	for _, snapshot := range snapshots {

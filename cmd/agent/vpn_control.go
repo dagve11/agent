@@ -246,15 +246,16 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	m.watchSidecarLogs(sessionCtx, req.SessionID, session.LogPath)
 
 	return model.VPNControlResult{
-		SessionID:     req.SessionID,
-		Action:        req.Action,
-		Role:          req.Role,
-		State:         model.VPNStateRunning,
-		LocalHTTP:     req.ListenHTTP,
-		LocalSOCKS:    req.ListenSOCKS,
-		TunName:       req.TunName,
-		Logs:          logs,
-		StartedAtUnix: now.Unix(),
+		SessionID:          req.SessionID,
+		Action:             req.Action,
+		Role:               req.Role,
+		State:              model.VPNStateRunning,
+		LocalHTTP:          req.ListenHTTP,
+		LocalSOCKS:         req.ListenSOCKS,
+		TunName:            req.TunName,
+		SystemProxyApplied: trackedVPNSystemProxyApplied(req, session),
+		Logs:               logs,
+		StartedAtUnix:      now.Unix(),
 	}, nil
 }
 
@@ -561,15 +562,16 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 		return payload, nil
 	}
 	payload := model.VPNControlResult{
-		SessionID:     req.SessionID,
-		Action:        req.Action,
-		Role:          req.Role,
-		State:         session.State,
-		LocalHTTP:     session.Request.ListenHTTP,
-		LocalSOCKS:    session.Request.ListenSOCKS,
-		TunName:       session.Request.TunName,
-		LastError:     session.LastError,
-		StartedAtUnix: session.StartedAt.Unix(),
+		SessionID:          req.SessionID,
+		Action:             req.Action,
+		Role:               req.Role,
+		State:              session.State,
+		LocalHTTP:          session.Request.ListenHTTP,
+		LocalSOCKS:         session.Request.ListenSOCKS,
+		TunName:            session.Request.TunName,
+		SystemProxyApplied: trackedVPNSystemProxyApplied(session.Request, session),
+		LastError:          session.LastError,
+		StartedAtUnix:      session.StartedAt.Unix(),
 	}
 	payload.Logs = readVPNLogTail(session.LogPath, 200)
 	m.attachStatusFileState(&payload, req, session)
@@ -598,6 +600,10 @@ func (m *AgentVPNManager) attachStatusFileState(payload *model.VPNControlResult,
 	if payload.RulesStatus == "ready" {
 		payload.RulesVersion = rulesDetail
 	}
+	systemProxyApplied, systemProxyLog := inspectVPNSystemProxyApplied(req)
+	if systemProxyApplied != nil {
+		payload.SystemProxyApplied = systemProxyApplied
+	}
 
 	logs := []string{
 		fmt.Sprintf("[core] status=%s path=%s", payload.CoreStatus, emptyVPNStatusValue(payload.CorePath)),
@@ -613,6 +619,9 @@ func (m *AgentVPNManager) attachStatusFileState(payload *model.VPNControlResult,
 		logs[1] += " version=" + payload.RulesVersion
 	} else if rulesDetail != "" {
 		logs[1] += " detail=" + rulesDetail
+	}
+	if systemProxyLog != "" {
+		logs = append(logs, systemProxyLog)
 	}
 	payload.Logs = append(payload.Logs, logs...)
 }

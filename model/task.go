@@ -136,27 +136,28 @@ type VPNCoreSpec struct {
 }
 
 type VPNControlResult struct {
-	SessionID     string   `json:"session_id"`
-	Action        string   `json:"action"`
-	Role          string   `json:"role"`
-	State         string   `json:"state"`
-	CheckID       string   `json:"check_id,omitempty"`
-	CoreVersion   string   `json:"core_version,omitempty"`
-	CoreStatus    string   `json:"core_status,omitempty"`
-	CorePath      string   `json:"core_path,omitempty"`
-	RulesStatus   string   `json:"rules_status,omitempty"`
-	RulesPath     string   `json:"rules_path,omitempty"`
-	RulesVersion  string   `json:"rules_version,omitempty"`
-	LocalHTTP     string   `json:"local_http,omitempty"`
-	LocalSOCKS    string   `json:"local_socks,omitempty"`
-	TunName       string   `json:"tun_name,omitempty"`
-	UploadBytes   uint64   `json:"upload_bytes,omitempty"`
-	DownloadBytes uint64   `json:"download_bytes,omitempty"`
-	ActiveConns   uint32   `json:"active_conns,omitempty"`
-	LastError     string   `json:"last_error,omitempty"`
-	Logs          []string `json:"logs,omitempty"`
-	StartedAtUnix int64    `json:"started_at,omitempty"`
-	StoppedAtUnix int64    `json:"stopped_at,omitempty"`
+	SessionID          string   `json:"session_id"`
+	Action             string   `json:"action"`
+	Role               string   `json:"role"`
+	State              string   `json:"state"`
+	CheckID            string   `json:"check_id,omitempty"`
+	CoreVersion        string   `json:"core_version,omitempty"`
+	CoreStatus         string   `json:"core_status,omitempty"`
+	CorePath           string   `json:"core_path,omitempty"`
+	RulesStatus        string   `json:"rules_status,omitempty"`
+	RulesPath          string   `json:"rules_path,omitempty"`
+	RulesVersion       string   `json:"rules_version,omitempty"`
+	LocalHTTP          string   `json:"local_http,omitempty"`
+	LocalSOCKS         string   `json:"local_socks,omitempty"`
+	TunName            string   `json:"tun_name,omitempty"`
+	SystemProxyApplied *bool    `json:"system_proxy_applied,omitempty"`
+	UploadBytes        uint64   `json:"upload_bytes,omitempty"`
+	DownloadBytes      uint64   `json:"download_bytes,omitempty"`
+	ActiveConns        uint32   `json:"active_conns,omitempty"`
+	LastError          string   `json:"last_error,omitempty"`
+	Logs               []string `json:"logs,omitempty"`
+	StartedAtUnix      int64    `json:"started_at,omitempty"`
+	StoppedAtUnix      int64    `json:"stopped_at,omitempty"`
 }
 
 type ExecRequest struct {

@@ -126,15 +126,16 @@ func (m *AgentVPNManager) Control(req model.VPNControlRequest) (model.VPNControl
 	}
 
 	return model.VPNControlResult{
-		SessionID:     req.SessionID,
-		Action:        req.Action,
-		Role:          req.Role,
-		State:         model.VPNStateRunning,
-		LocalHTTP:     req.ListenHTTP,
-		LocalSOCKS:    req.ListenSOCKS,
-		TunName:       req.TunName,
-		Logs:          logs,
-		StartedAtUnix: session.StartedAt.Unix(),
+		SessionID:          req.SessionID,
+		Action:             req.Action,
+		Role:               req.Role,
+		State:              model.VPNStateRunning,
+		LocalHTTP:          req.ListenHTTP,
+		LocalSOCKS:         req.ListenSOCKS,
+		TunName:            req.TunName,
+		SystemProxyApplied: trackedVPNSystemProxyApplied(req, session),
+		Logs:               logs,
+		StartedAtUnix:      session.StartedAt.Unix(),
 	}, nil
 }
 
