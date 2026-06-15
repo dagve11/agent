@@ -381,6 +381,48 @@ func TestPrepareVPNCoreDownloadsPlatformCoreFromBaseURLManifestAndRedirect(t *te
 	}
 }
 
+func TestVPNCoreDownloadCandidatesPreferCNSource(t *testing.T) {
+	t.Setenv("NZ_VPN_CORE_CN", "1")
+
+	assetName := vpnCoreAssetName(runtime.GOOS, runtime.GOARCH)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write([]byte(`{"assets":[{"asset":"` + assetName + `","sha256":"` + strings.Repeat("a", 64) + `","url":"` + server.URL + `/global","cn_url":"` + server.URL + `/cn"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	candidates, err := vpnCoreDownloadCandidates(context.Background(), model.VPNCoreSpec{
+		Name:              "sing-box",
+		DownloadBaseURL:   server.URL + "/global-base",
+		CNDownloadBaseURL: server.URL + "/cn-base",
+		ManifestURL:       server.URL + "/manifest.json",
+		CNManifestURL:     server.URL + "/manifest.json",
+	}, server.Client())
+	if err != nil {
+		t.Fatalf("build core download candidates: %v", err)
+	}
+
+	want := []string{
+		server.URL + "/cn",
+		server.URL + "/global",
+		server.URL + "/cn-base/" + assetName,
+		server.URL + "/global-base/" + assetName,
+	}
+	if len(candidates) != len(want) {
+		t.Fatalf("candidate count = %d, want %d: %#v", len(candidates), len(want), candidates)
+	}
+	for i, candidate := range candidates {
+		if candidate.URL != want[i] {
+			t.Fatalf("candidate %d URL = %q, want %q", i, candidate.URL, want[i])
+		}
+	}
+}
+
 func TestPrepareVPNCoreRejectsInvalidSpecBeforeDownload(t *testing.T) {
 	workDir := t.TempDir()
 	corePath := filepath.Join(workDir, "core", "sing-box")
