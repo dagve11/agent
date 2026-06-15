@@ -28,7 +28,7 @@ const (
 	vpnInboundLocalHTTP      = "local-http"
 	vpnInboundLocalSOCKS     = "local-socks"
 	vpnInboundRelay          = "relay-in"
-	vpnSingBoxConfigLogLevel = "info"
+	vpnSingBoxConfigLogLevel = "warn"
 	vpnRuleSetGeositeCN      = "geosite-cn"
 	vpnRuleSetGeoIPCN        = "geoip-cn"
 )
