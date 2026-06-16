@@ -1320,16 +1320,6 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 func (m *AgentVPNManager) CleanupStaleSessions() {
 	states := loadAgentVPNSessionStates(m.effectiveWorkDir())
 	for _, state := range states {
-		sessionID := strings.TrimSpace(state.SessionID)
-		if sessionID == "" {
-			continue
-		}
-		m.mu.Lock()
-		activeSession := m.sessions[sessionID] != nil
-		m.mu.Unlock()
-		if activeSession {
-			continue
-		}
 		if state.SystemProxyApplied && m.systemProxyManager != nil {
 			if err := m.systemProxyManager.Restore(); err != nil {
 				printf("VPN stale system proxy restore failed for session %s: %v", state.SessionID, err)
