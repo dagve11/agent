@@ -21,10 +21,15 @@ func (m *AgentVPNManager) activeVPNSidecarPIDs() map[int]struct{} {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	active := make(map[int]struct{}, len(m.sessions))
+	active := make(map[int]struct{}, len(m.sessions)+len(m.sharedExitRuntimes))
 	for _, session := range m.sessions {
 		if pid := vpnTrackedSessionSidecarPID(session); pid > 0 {
 			active[pid] = struct{}{}
+		}
+	}
+	for _, runtime := range m.sharedExitRuntimes {
+		if runtime != nil && runtime.sidecarPID > 0 {
+			active[runtime.sidecarPID] = struct{}{}
 		}
 	}
 	if len(active) == 0 {

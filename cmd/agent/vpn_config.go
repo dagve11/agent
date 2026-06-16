@@ -19,6 +19,7 @@ const (
 	defaultVPNTunDNSServer   = "https://1.1.1.1/dns-query"
 	defaultVPNEntryBridge    = "127.0.0.1:19090"
 	defaultVPNExitBridge     = "127.0.0.1:19091"
+	defaultVPNPolicyCoreID   = "core_policy"
 	vpnOutboundExit          = "vpn-exit"
 	vpnOutboundDirect        = "direct"
 	vpnOutboundBlock         = "block"
@@ -294,11 +295,7 @@ func vpnRuleSetDirFromRequest(req model.VPNControlRequest) string {
 	if dir := strings.TrimSpace(req.Extra["rules_dir"]); dir != "" {
 		return dir
 	}
-	coreSessionID := strings.TrimSpace(req.Extra["core_session_id"])
-	if coreSessionID == "" {
-		coreSessionID = req.SessionID
-	}
-	return filepath.Join(defaultVPNSessionCoreCleanupDir(coreSessionID), "rules")
+	return filepath.Join(defaultVPNSessionCoreCleanupDir(vpnCoreSessionIDFromRequest(req)), "rules")
 }
 
 func buildVPNTunDNS(req model.VPNControlRequest) map[string]any {

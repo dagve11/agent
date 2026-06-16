@@ -130,8 +130,9 @@ func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnCleanup(t *testin
 		},
 	}
 	req = withTestVPNBridgeAddress(t, req)
-	t.Cleanup(func() { _ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID)) })
-	_ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID))
+	coreDir := defaultVPNSessionCoreCleanupDir(defaultVPNPolicyCoreID)
+	t.Cleanup(func() { _ = os.RemoveAll(coreDir) })
+	_ = os.RemoveAll(coreDir)
 
 	payload, err := manager.Start(req)
 	if err != nil {
@@ -173,6 +174,84 @@ func TestAgentVPNDownloadsCoreToTemporarySessionDirAndRemovesOnCleanup(t *testin
 	}
 }
 
+func TestAgentVPNExitSharesOneCoreRuntimeAcrossSessions(t *testing.T) {
+	originalConfig := agentConfig
+	t.Cleanup(func() { agentConfig = originalConfig })
+	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}
+
+	manager := NewAgentVPNManager()
+	manager.workDir = t.TempDir()
+	manager.corePath = filepath.Join(t.TempDir(), "core", "sing-box")
+	if err := os.MkdirAll(filepath.Dir(manager.corePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.corePath, []byte("shared-core"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager.ioStreamFactory = func(context.Context) (vpnIOStream, error) {
+		return &recordingVPNIOStream{}, nil
+	}
+	processes := []*recordingVPNSidecarProcess{}
+	manager.sidecarRunner = func(context.Context, vpnSidecarStartSpec) (vpnSidecarProcess, error) {
+		process := newBlockingRecordingVPNSidecarProcess()
+		processes = append(processes, process)
+		return process, nil
+	}
+
+	first := model.VPNControlRequest{
+		SessionID:     "vpn-session-shared-exit-1",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleExit,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-exit-stream-shared-1",
+		Token:         "session-token",
+	}
+	first = withTestVPNBridgeAddress(t, first)
+	second := first
+	second.SessionID = "vpn-session-shared-exit-2"
+	second.RelayStreamID = "vpn-exit-stream-shared-2"
+	second.Extra = map[string]string{
+		"bridge_listen": freeLocalTCPAddrForTest(t),
+	}
+	firstBridgeListen := first.Extra["bridge_listen"]
+
+	if _, err := manager.Start(first); err != nil {
+		t.Fatalf("start first shared exit session: %v", err)
+	}
+	if _, err := manager.Start(second); err != nil {
+		t.Fatalf("start second shared exit session: %v", err)
+	}
+	if len(processes) != 1 {
+		t.Fatalf("exit sessions must share one sidecar, started=%d", len(processes))
+	}
+	secondSession, ok := manager.Get(second.SessionID)
+	if !ok {
+		t.Fatal("second shared exit session must be tracked")
+	}
+	if secondSession.Request.Extra["bridge_listen"] != firstBridgeListen {
+		t.Fatalf("second shared exit session must reuse first bridge listen address: got=%q want=%q", secondSession.Request.Extra["bridge_listen"], firstBridgeListen)
+	}
+
+	stopFirst := first
+	stopFirst.Action = model.VPNActionStop
+	if _, err := manager.Stop(stopFirst); err != nil {
+		t.Fatalf("stop first shared exit session: %v", err)
+	}
+	if processes[0].stopCalls != 0 {
+		t.Fatalf("shared exit sidecar must keep running while referenced, stopCalls=%d", processes[0].stopCalls)
+	}
+
+	stopSecond := second
+	stopSecond.Action = model.VPNActionStop
+	if _, err := manager.Stop(stopSecond); err != nil {
+		t.Fatalf("stop second shared exit session: %v", err)
+	}
+	if processes[0].stopCalls != 1 {
+		t.Fatalf("shared exit sidecar must stop after last reference, stopCalls=%d", processes[0].stopCalls)
+	}
+}
+
 func TestAgentVPNPrepareDownloadsCoreWithoutStartingSidecar(t *testing.T) {
 	originalConfig := agentConfig
 	t.Cleanup(func() { agentConfig = originalConfig })
@@ -205,8 +284,9 @@ func TestAgentVPNPrepareDownloadsCoreWithoutStartingSidecar(t *testing.T) {
 			DownloadURL: server.URL + "/sing-box",
 		},
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID)) })
-	_ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID))
+	coreDir := defaultVPNSessionCoreCleanupDir(defaultVPNPolicyCoreID)
+	t.Cleanup(func() { _ = os.RemoveAll(coreDir) })
+	_ = os.RemoveAll(coreDir)
 
 	payload, err := manager.Prepare(req)
 	if err != nil {
@@ -221,7 +301,7 @@ func TestAgentVPNPrepareDownloadsCoreWithoutStartingSidecar(t *testing.T) {
 	if _, ok := manager.Get(req.SessionID); ok {
 		t.Fatal("prepare must not create a running local session")
 	}
-	corePath := filepath.Join(defaultVPNSessionCoreCleanupDir(req.SessionID), "core", vpnCoreFileName(req.Core))
+	corePath := filepath.Join(coreDir, "core", vpnCoreFileName(req.Core))
 	if _, err := os.Stat(corePath); err != nil {
 		t.Fatalf("prepared temporary core must exist: %v", err)
 	}
@@ -256,13 +336,13 @@ func TestAgentVPNCleanupRemovesPreparedTemporaryCore(t *testing.T) {
 			DownloadURL: server.URL + "/sing-box",
 		},
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID)) })
-	_ = os.RemoveAll(defaultVPNSessionCoreCleanupDir(req.SessionID))
+	coreDir := defaultVPNSessionCoreCleanupDir(defaultVPNPolicyCoreID)
+	t.Cleanup(func() { _ = os.RemoveAll(coreDir) })
+	_ = os.RemoveAll(coreDir)
 
 	if _, err := manager.Prepare(req); err != nil {
 		t.Fatalf("prepare VPN core: %v", err)
 	}
-	coreDir := defaultVPNSessionCoreCleanupDir(req.SessionID)
 	if _, err := os.Stat(filepath.Join(coreDir, "core", vpnCoreFileName(req.Core))); err != nil {
 		t.Fatalf("prepared temporary core must exist before stop: %v", err)
 	}
