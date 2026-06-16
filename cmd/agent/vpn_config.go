@@ -108,10 +108,7 @@ func buildVPNEntryOutbounds(req model.VPNControlRequest, bridgeHost string, brid
 			"server":      bridgeHost,
 			"server_port": bridgePort,
 		},
-		{
-			"type": "direct",
-			"tag":  vpnOutboundDirect,
-		},
+		buildVPNDirectOutbound(),
 		{
 			"type": "block",
 			"tag":  vpnOutboundBlock,
@@ -119,6 +116,14 @@ func buildVPNEntryOutbounds(req model.VPNControlRequest, bridgeHost string, brid
 		buildVPNSelectorOutbound(vpnOutboundModeSelector, finalOutbound),
 		buildVPNSelectorOutbound(vpnOutboundRuleMatch, ruleMatchOutbound),
 		buildVPNSelectorOutbound(vpnOutboundRuleDirect, ruleDirectOutbound),
+	}
+}
+
+func buildVPNDirectOutbound() map[string]any {
+	return map[string]any{
+		"type":            "direct",
+		"tag":             vpnOutboundDirect,
+		"domain_strategy": "prefer_ipv4",
 	}
 }
 
@@ -360,10 +365,7 @@ func buildVPNExitSingBoxConfig(req model.VPNControlRequest) (map[string]any, err
 			},
 		},
 		"outbounds": []map[string]any{
-			{
-				"type": "direct",
-				"tag":  vpnOutboundDirect,
-			},
+			buildVPNDirectOutbound(),
 			{
 				"type": "block",
 				"tag":  vpnOutboundBlock,
