@@ -237,6 +237,21 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		return vpnFailedResultWithLogs(req, err, append(cleanupLogs, fmt.Sprintf("[tun-health] %s rollback=sidecar-stopped,relay-closed", err.Error()))), err
 	}
 	if shouldApplyVPNSystemProxy(req) {
+		if err := m.clearForeignSystemProxyBeforeApply(req); err != nil {
+			_ = bridge.Close()
+			cleanupLogs := m.restoreSessionTunForStartupFailure(session)
+			if session.sharedExitRuntimeKey != "" {
+				cleanupLogs = append(cleanupLogs, m.releaseSharedExitRuntime(session)...)
+			} else {
+				_ = sidecar.Stop()
+			}
+			_ = relay.CloseSend()
+			sessionCancel()
+			err = fmt.Errorf("clear foreign VPN system proxy before apply for session %s: %w", req.SessionID, err)
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_clear=failed: "+err.Error())
+			cleanupLogs = append(cleanupLogs, "[cleanup] rollback=bridge-closed,sidecar-stopped,relay-closed")
+			return vpnFailedResultWithLogs(req, err, cleanupLogs), err
+		}
 		if err := m.systemProxyManager.Apply(req.ListenHTTP, req.ListenSOCKS); err != nil {
 			_ = bridge.Close()
 			cleanupLogs := m.restoreSessionTunForStartupFailure(session)
@@ -1532,6 +1547,17 @@ func (m *AgentVPNManager) preflightTun(req model.VPNControlRequest) error {
 		return fmt.Errorf("VPN TUN preflight failed for session %s: %w", req.SessionID, err)
 	}
 	return nil
+}
+
+func (m *AgentVPNManager) clearForeignSystemProxyBeforeApply(req model.VPNControlRequest) error {
+	if m.systemProxyManager == nil {
+		return nil
+	}
+	inspection, err := m.systemProxyManager.Inspect(req.ListenHTTP, req.ListenSOCKS)
+	if err == nil && inspection.Applied {
+		return nil
+	}
+	return m.clearSessionSystemProxy()
 }
 
 func (m *AgentVPNManager) restoreSessionSystemProxy(session *AgentVPNSession) error {

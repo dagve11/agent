@@ -431,6 +431,9 @@ func TestHandleVPNControlRestartRestoresExistingEntrySession(t *testing.T) {
 	if proxy.applyCalls != 1 {
 		t.Fatalf("start must apply system proxy once, got %d", proxy.applyCalls)
 	}
+	if proxy.inspectCalls != 1 || proxy.clearCalls != 1 {
+		t.Fatalf("start must inspect and clear foreign system proxy once, got %#v", proxy)
+	}
 
 	restart := req
 	restart.Action = model.VPNActionRestart
@@ -441,13 +444,13 @@ func TestHandleVPNControlRestartRestoresExistingEntrySession(t *testing.T) {
 	if proxy.restoreCalls != 1 {
 		t.Fatalf("restart must restore old system proxy before new start, got %d", proxy.restoreCalls)
 	}
-	if proxy.clearCalls != 1 {
-		t.Fatalf("restart must clear old system proxy before restore, got %d", proxy.clearCalls)
+	if proxy.clearCalls != 3 {
+		t.Fatalf("restart must clear foreign system proxy before apply and old proxy before restore, got %d", proxy.clearCalls)
 	}
 	if proxy.applyCalls != 2 {
 		t.Fatalf("restart must apply system proxy for new session, got %d", proxy.applyCalls)
 	}
-	if got, want := strings.Join(proxy.operations, ","), "apply,clear,restore,apply"; got != want {
+	if got, want := strings.Join(proxy.operations, ","), "inspect,clear,apply,clear,restore,inspect,clear,apply"; got != want {
 		t.Fatalf("restart system proxy operations mismatch: want %s got %s", want, got)
 	}
 	if len(processes) != 2 {

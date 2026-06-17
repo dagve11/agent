@@ -263,6 +263,9 @@ func TestAgentVPNSystemProxyApplyAndRestoreOnStop(t *testing.T) {
 	if proxy.applyCalls != 1 || proxy.lastHTTP != req.ListenHTTP || proxy.lastSOCKS != req.ListenSOCKS {
 		t.Fatalf("system proxy must be applied once with local proxy addresses, got %#v", proxy)
 	}
+	if proxy.inspectCalls != 1 || proxy.clearCalls != 1 {
+		t.Fatalf("start must inspect and clear foreign system proxy before apply, got %#v", proxy)
+	}
 
 	stopReq := req
 	stopReq.Action = model.VPNActionStop
@@ -271,6 +274,43 @@ func TestAgentVPNSystemProxyApplyAndRestoreOnStop(t *testing.T) {
 	}
 	if proxy.restoreCalls != 1 {
 		t.Fatalf("system proxy must be restored once on stop, got %d", proxy.restoreCalls)
+	}
+}
+
+func TestAgentVPNSystemProxyStartSkipsClearWhenAlreadyApplied(t *testing.T) {
+	resetVPNManagerForTest(t)
+	proxy := &recordingVPNSystemProxyManager{inspection: vpnSystemProxyInspection{Applied: true, Status: "applied"}}
+	vpnManager.systemProxyManager = proxy
+
+	req := model.VPNControlRequest{
+		SessionID:     "vpn-session-proxy-owned",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleEntry,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-entry-stream-proxy-owned",
+		Token:         "session-token",
+		ListenHTTP:    "127.0.0.1:8088",
+		ListenSOCKS:   "127.0.0.1:1080",
+		Extra: map[string]string{
+			"set_system_proxy": "true",
+		},
+	}
+	req = withTestVPNBridgeAddress(t, req)
+	if _, err := vpnManager.Start(req); err != nil {
+		t.Fatalf("start VPN: %v", err)
+	}
+	if proxy.inspectCalls != 1 {
+		t.Fatalf("start must inspect system proxy ownership once, got %d", proxy.inspectCalls)
+	}
+	if proxy.clearCalls != 0 {
+		t.Fatalf("start must not clear system proxy already owned by this project, got %d", proxy.clearCalls)
+	}
+	if proxy.applyCalls != 1 {
+		t.Fatalf("start must still apply system proxy once, got %d", proxy.applyCalls)
+	}
+	if got, want := strings.Join(proxy.operations, ","), "inspect,apply"; got != want {
+		t.Fatalf("system proxy operations mismatch: want %s got %s", want, got)
 	}
 }
 
@@ -1893,10 +1933,13 @@ type recordingVPNSidecarProcess struct {
 type recordingVPNSystemProxyManager struct {
 	applyCalls   int
 	clearCalls   int
+	inspectCalls int
 	restoreCalls int
 	applyErr     error
 	clearErr     error
+	inspectErr   error
 	restoreErr   error
+	inspection   vpnSystemProxyInspection
 	lastHTTP     string
 	lastSOCKS    string
 	operations   []string
@@ -1972,6 +2015,14 @@ func (m *recordingVPNSystemProxyManager) Clear() error {
 	m.clearCalls++
 	m.operations = append(m.operations, "clear")
 	return m.clearErr
+}
+
+func (m *recordingVPNSystemProxyManager) Inspect(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	m.inspectCalls++
+	m.lastHTTP = httpAddr
+	m.lastSOCKS = socksAddr
+	m.operations = append(m.operations, "inspect")
+	return m.inspection, m.inspectErr
 }
 
 func (m *recordingVPNSystemProxyManager) Restore() error {

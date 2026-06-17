@@ -117,6 +117,10 @@ func (m *windowsVPNSystemProxyManager) Clear() error {
 	return errors.Join(errs...)
 }
 
+func (m *windowsVPNSystemProxyManager) Inspect(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	return platformVPNSystemProxyStatus(httpAddr, socksAddr)
+}
+
 func buildWindowsProxyServer(httpAddr string, socksAddr string) string {
 	httpAddr = strings.TrimSpace(httpAddr)
 	socksAddr = strings.TrimSpace(socksAddr)

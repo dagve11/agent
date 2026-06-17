@@ -132,6 +132,10 @@ func (m *linuxVPNSystemProxyManager) Clear() error {
 	return nil
 }
 
+func (m *linuxVPNSystemProxyManager) Inspect(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	return platformVPNSystemProxyStatus(httpAddr, socksAddr)
+}
+
 func (m *linuxVPNSystemProxyManager) clearBackend() (linuxSystemProxyBackend, error) {
 	if m.applied {
 		return linuxSystemProxyBackend{

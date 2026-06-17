@@ -11,6 +11,7 @@ import (
 type vpnSystemProxyManager interface {
 	Apply(httpAddr string, socksAddr string) error
 	Clear() error
+	Inspect(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error)
 	Restore() error
 }
 
@@ -34,6 +35,10 @@ func (unsupportedVPNSystemProxyManager) Apply(string, string) error {
 
 func (unsupportedVPNSystemProxyManager) Clear() error {
 	return nil
+}
+
+func (unsupportedVPNSystemProxyManager) Inspect(string, string) (vpnSystemProxyInspection, error) {
+	return vpnSystemProxyInspection{}, errors.New("VPN system proxy inspection is not supported on " + runtime.GOOS)
 }
 
 func (unsupportedVPNSystemProxyManager) Restore() error {

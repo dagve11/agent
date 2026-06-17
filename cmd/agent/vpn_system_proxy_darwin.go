@@ -81,6 +81,10 @@ func (m *darwinVPNSystemProxyManager) Clear() error {
 	return nil
 }
 
+func (m *darwinVPNSystemProxyManager) Inspect(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {
+	return platformVPNSystemProxyStatus(httpAddr, socksAddr)
+}
+
 func collectDarwinProxyStates(services []string) ([]darwinVPNProxyState, error) {
 	var states []darwinVPNProxyState
 	for _, service := range services {
