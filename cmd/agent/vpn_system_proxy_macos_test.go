@@ -72,3 +72,18 @@ func TestBuildDarwinSystemProxyRestoreCommands(t *testing.T) {
 		t.Fatalf("darwin proxy restore commands mismatch:\nwant %#v\ngot  %#v", want, got)
 	}
 }
+
+func TestBuildDarwinSystemProxyClearCommands(t *testing.T) {
+	got := buildDarwinSystemProxyClearCommands([]string{"Wi-Fi", "Ethernet"})
+	want := []vpnTunCommand{
+		{Name: "networksetup", Args: []string{"-setwebproxystate", "Wi-Fi", "off"}},
+		{Name: "networksetup", Args: []string{"-setsecurewebproxystate", "Wi-Fi", "off"}},
+		{Name: "networksetup", Args: []string{"-setsocksfirewallproxystate", "Wi-Fi", "off"}},
+		{Name: "networksetup", Args: []string{"-setwebproxystate", "Ethernet", "off"}},
+		{Name: "networksetup", Args: []string{"-setsecurewebproxystate", "Ethernet", "off"}},
+		{Name: "networksetup", Args: []string{"-setsocksfirewallproxystate", "Ethernet", "off"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("darwin proxy clear commands mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}

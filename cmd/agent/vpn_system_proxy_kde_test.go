@@ -63,6 +63,20 @@ func TestBuildLinuxKDEProxyRestoreCommands(t *testing.T) {
 	}
 }
 
+func TestBuildLinuxKDEProxyClearCommands(t *testing.T) {
+	got := buildLinuxKDEProxyClearCommands("kwriteconfig6")
+	want := []vpnTunCommand{
+		{Name: "kwriteconfig6", Args: []string{"--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "0"}},
+		{Name: "kwriteconfig6", Args: []string{"--file", "kioslaverc", "--group", "Proxy Settings", "--key", "Authmode", "0"}},
+		{Name: "kwriteconfig6", Args: []string{"--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpProxy", ""}},
+		{Name: "kwriteconfig6", Args: []string{"--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpsProxy", ""}},
+		{Name: "kwriteconfig6", Args: []string{"--file", "kioslaverc", "--group", "Proxy Settings", "--key", "socksProxy", ""}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("KDE proxy clear commands mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}
+
 func TestBuildLinuxKDEProxyReadCommands(t *testing.T) {
 	got := buildLinuxKDEProxyReadCommands("kreadconfig6")
 	want := []vpnTunCommand{
@@ -129,6 +143,17 @@ func TestBuildLinuxEnvProxyRestoreCommandsRestoresSetAndUnsetVariables(t *testin
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("linux env restore commands mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}
+
+func TestBuildLinuxEnvProxyClearCommands(t *testing.T) {
+	got := buildLinuxEnvProxyClearCommands("systemctl", "dbus-update-activation-environment")
+	want := []vpnTunCommand{
+		{Name: "systemctl", Args: []string{"--user", "unset-environment", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"}},
+		{Name: "dbus-update-activation-environment", Args: []string{"--systemd", "http_proxy=", "https_proxy=", "HTTP_PROXY=", "HTTPS_PROXY=", "all_proxy=", "ALL_PROXY="}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("linux env clear commands mismatch:\nwant %#v\ngot  %#v", want, got)
 	}
 }
 

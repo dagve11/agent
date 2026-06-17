@@ -99,6 +99,24 @@ func (m *windowsVPNSystemProxyManager) Restore() error {
 	return nil
 }
 
+func (m *windowsVPNSystemProxyManager) Clear() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	targets, err := windowsProxyTargetKeys()
+	if err != nil {
+		return err
+	}
+	errs := make([]error, 0)
+	for _, key := range targets {
+		if err := clearWindowsProxyKey(key); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	notifyWindowsProxySettingsChanged()
+	return errors.Join(errs...)
+}
+
 func buildWindowsProxyServer(httpAddr string, socksAddr string) string {
 	httpAddr = strings.TrimSpace(httpAddr)
 	socksAddr = strings.TrimSpace(socksAddr)
@@ -176,6 +194,20 @@ func applyWindowsProxyToKey(key string, proxyServer string) error {
 		return err
 	}
 	return setWindowsRegistryString(key, winProxyOverrideValue, winProxyOverrideLocal)
+}
+
+func clearWindowsProxyKey(key string) error {
+	errs := make([]error, 0, 3)
+	if err := setWindowsRegistryDWORD(key, winProxyEnableValue, "0"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := deleteWindowsRegistryValue(key, winProxyServerValue); err != nil {
+		errs = append(errs, err)
+	}
+	if err := deleteWindowsRegistryValue(key, winProxyOverrideValue); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func platformVPNSystemProxyStatus(httpAddr string, socksAddr string) (vpnSystemProxyInspection, error) {

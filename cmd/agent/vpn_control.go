@@ -144,7 +144,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		return vpnFailedResult(req, err), err
 	}
 	ensureVPNRuntimeControlExtra(&req)
-	cleanupLogs, err := m.stopExistingSessionBeforeStart(req.SessionID)
+	cleanupLogs, err := m.stopExistingSessionBeforeStart(req)
 	if err != nil {
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
 	}
@@ -351,7 +351,8 @@ func (m *AgentVPNManager) Prepare(req model.VPNControlRequest) (model.VPNControl
 	}, nil
 }
 
-func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]string, error) {
+func (m *AgentVPNManager) stopExistingSessionBeforeStart(req model.VPNControlRequest) ([]string, error) {
+	sessionID := strings.TrimSpace(req.SessionID)
 	m.mu.Lock()
 	_, exists := m.sessions[sessionID]
 	m.mu.Unlock()
@@ -361,7 +362,7 @@ func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]st
 	logs, err := m.stopTrackedSession(model.VPNControlRequest{
 		SessionID: sessionID,
 		Action:    model.VPNActionStop,
-	}, true, false)
+	}, true, false, req.Action == model.VPNActionRestart)
 	if err != nil {
 		printf("VPN existing session cleanup failed before start %s: %v", sessionID, err)
 		return logs, err
@@ -370,7 +371,7 @@ func (m *AgentVPNManager) stopExistingSessionBeforeStart(sessionID string) ([]st
 }
 
 func (m *AgentVPNManager) Stop(req model.VPNControlRequest) (model.VPNControlResult, error) {
-	logs, err := m.stopTrackedSession(req, false, false)
+	logs, err := m.stopTrackedSession(req, false, false, false)
 	if err != nil {
 		return vpnFailedResult(req, err), err
 	}
@@ -385,7 +386,7 @@ func (m *AgentVPNManager) Stop(req model.VPNControlRequest) (model.VPNControlRes
 }
 
 func (m *AgentVPNManager) Cleanup(req model.VPNControlRequest) (model.VPNControlResult, error) {
-	logs, err := m.stopTrackedSession(req, false, true)
+	logs, err := m.stopTrackedSession(req, false, true, false)
 	if err != nil {
 		return vpnFailedResult(req, err), err
 	}
@@ -467,7 +468,7 @@ func (m *AgentVPNManager) CleanupRules(req model.VPNControlRequest) (model.VPNCo
 	}, nil
 }
 
-func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOnTunRestore bool, cleanupCore bool) ([]string, error) {
+func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOnTunRestore bool, cleanupCore bool, clearSystemProxyBeforeRestore bool) ([]string, error) {
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, errors.New("session_id is required")
 	}
@@ -487,11 +488,22 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 		session.cancel()
 	}
 	systemProxyWasApplied := session != nil && session.systemProxyApplied
-	systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
-	if systemProxyRestoreErr != nil {
-		logs = append(logs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
-	} else if systemProxyWasApplied {
-		logs = append(logs, "[cleanup] system_proxy_restore=ok")
+	var systemProxyRestoreErr error
+	if clearSystemProxyBeforeRestore && systemProxyWasApplied {
+		if clearErr := m.clearSessionSystemProxy(); clearErr != nil {
+			systemProxyRestoreErr = fmt.Errorf("clear VPN system proxy before restore for session %s: %w", req.SessionID, clearErr)
+			logs = append(logs, "[cleanup] system_proxy_clear=failed: "+clearErr.Error())
+		} else {
+			logs = append(logs, "[cleanup] system_proxy_clear=ok")
+		}
+	}
+	if systemProxyRestoreErr == nil {
+		systemProxyRestoreErr = m.restoreSessionSystemProxy(session)
+		if systemProxyRestoreErr != nil {
+			logs = append(logs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
+		} else if systemProxyWasApplied {
+			logs = append(logs, "[cleanup] system_proxy_restore=ok")
+		}
 	}
 	if session != nil && session.relay != nil {
 		_ = session.relay.CloseSend()
@@ -1531,6 +1543,17 @@ func (m *AgentVPNManager) restoreSessionSystemProxy(session *AgentVPNSession) er
 		return err
 	}
 	session.systemProxyApplied = false
+	return nil
+}
+
+func (m *AgentVPNManager) clearSessionSystemProxy() error {
+	if m.systemProxyManager == nil {
+		return nil
+	}
+	if err := m.systemProxyManager.Clear(); err != nil {
+		printf("VPN system proxy clear failed: %v", err)
+		return err
+	}
 	return nil
 }
 

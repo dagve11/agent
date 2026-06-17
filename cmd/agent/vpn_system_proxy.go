@@ -10,6 +10,7 @@ import (
 
 type vpnSystemProxyManager interface {
 	Apply(httpAddr string, socksAddr string) error
+	Clear() error
 	Restore() error
 }
 
@@ -29,6 +30,10 @@ func defaultVPNSystemProxyManager() vpnSystemProxyManager {
 
 func (unsupportedVPNSystemProxyManager) Apply(string, string) error {
 	return errors.New("VPN system proxy setup is not supported on " + runtime.GOOS)
+}
+
+func (unsupportedVPNSystemProxyManager) Clear() error {
+	return nil
 }
 
 func (unsupportedVPNSystemProxyManager) Restore() error {

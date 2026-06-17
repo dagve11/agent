@@ -1892,11 +1892,14 @@ type recordingVPNSidecarProcess struct {
 
 type recordingVPNSystemProxyManager struct {
 	applyCalls   int
+	clearCalls   int
 	restoreCalls int
 	applyErr     error
+	clearErr     error
 	restoreErr   error
 	lastHTTP     string
 	lastSOCKS    string
+	operations   []string
 }
 
 type recordingVPNTunManager struct {
@@ -1961,11 +1964,19 @@ func (m *recordingVPNSystemProxyManager) Apply(httpAddr string, socksAddr string
 	m.applyCalls++
 	m.lastHTTP = httpAddr
 	m.lastSOCKS = socksAddr
+	m.operations = append(m.operations, "apply")
 	return m.applyErr
+}
+
+func (m *recordingVPNSystemProxyManager) Clear() error {
+	m.clearCalls++
+	m.operations = append(m.operations, "clear")
+	return m.clearErr
 }
 
 func (m *recordingVPNSystemProxyManager) Restore() error {
 	m.restoreCalls++
+	m.operations = append(m.operations, "restore")
 	return m.restoreErr
 }
 

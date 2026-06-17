@@ -72,3 +72,20 @@ func TestBuildLinuxGSettingsProxyRestoreCommands(t *testing.T) {
 		t.Fatalf("linux gsettings restore commands mismatch:\nwant %#v\ngot  %#v", want, got)
 	}
 }
+
+func TestBuildLinuxGSettingsProxyClearCommands(t *testing.T) {
+	got := buildLinuxGSettingsProxyClearCommands()
+	want := []vpnTunCommand{
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.http", "host", "''"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.http", "port", "0"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.http", "enabled", "false"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.https", "host", "''"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.https", "port", "0"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.socks", "host", "''"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy.socks", "port", "0"}},
+		{Name: "gsettings", Args: []string{"set", "org.gnome.system.proxy", "mode", "'none'"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("linux gsettings clear commands mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}

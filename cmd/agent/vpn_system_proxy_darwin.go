@@ -65,6 +65,22 @@ func (m *darwinVPNSystemProxyManager) Restore() error {
 	return nil
 }
 
+func (m *darwinVPNSystemProxyManager) Clear() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	servicesRaw, err := runVPNTunCommandOutput("networksetup", "-listallnetworkservices")
+	if err != nil {
+		return err
+	}
+	for _, command := range buildDarwinSystemProxyClearCommands(parseDarwinNetworkServices(servicesRaw)) {
+		if err := runVPNTunCommand(command); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func collectDarwinProxyStates(services []string) ([]darwinVPNProxyState, error) {
 	var states []darwinVPNProxyState
 	for _, service := range services {

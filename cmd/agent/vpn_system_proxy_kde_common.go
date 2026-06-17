@@ -73,6 +73,16 @@ func buildLinuxKDEProxyRestoreCommands(writeCommand string, states []linuxKDEPro
 	return commands
 }
 
+func buildLinuxKDEProxyClearCommands(writeCommand string) []vpnTunCommand {
+	return []vpnTunCommand{
+		linuxKDEConfigSetCommand(writeCommand, "ProxyType", "0"),
+		linuxKDEConfigSetCommand(writeCommand, "Authmode", "0"),
+		linuxKDEConfigSetCommand(writeCommand, "httpProxy", ""),
+		linuxKDEConfigSetCommand(writeCommand, "httpsProxy", ""),
+		linuxKDEConfigSetCommand(writeCommand, "socksProxy", ""),
+	}
+}
+
 func linuxKDEConfigCommand(name string, key string) vpnTunCommand {
 	return vpnTunCommand{
 		Name: name,

@@ -106,6 +106,23 @@ func buildDarwinSystemProxyRestoreCommands(states []darwinVPNProxyState) []vpnTu
 	return commands
 }
 
+func buildDarwinSystemProxyClearCommands(services []string) []vpnTunCommand {
+	var commands []vpnTunCommand
+	for _, service := range services {
+		service = strings.TrimSpace(service)
+		if service == "" {
+			continue
+		}
+		for _, kind := range darwinProxyKinds {
+			commands = append(commands, vpnTunCommand{
+				Name: "networksetup",
+				Args: []string{darwinProxyStateCommand(kind), service, "off"},
+			})
+		}
+	}
+	return commands
+}
+
 func darwinSplitProxyListen(address string) (string, string, bool, error) {
 	address = strings.TrimSpace(address)
 	if address == "" {

@@ -111,6 +111,38 @@ func (m *linuxVPNSystemProxyManager) Restore() error {
 	return nil
 }
 
+func (m *linuxVPNSystemProxyManager) Clear() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	backend, err := m.clearBackend()
+	if err != nil {
+		return err
+	}
+	for _, command := range buildLinuxSystemProxyClearCommands(backend) {
+		if err := runVPNTunCommand(command); err != nil {
+			return err
+		}
+	}
+	if backend.Name == "kde" && strings.TrimSpace(backend.NotifyCommand) != "" {
+		if err := runVPNTunCommand(linuxKDEProxyNotifyCommand(backend.NotifyCommand)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *linuxVPNSystemProxyManager) clearBackend() (linuxSystemProxyBackend, error) {
+	if m.applied {
+		return linuxSystemProxyBackend{
+			Name:          m.backend,
+			WriteCommand:  firstNonEmptyString(m.kdeWriteCommand, m.envWriteCommand),
+			NotifyCommand: firstNonEmptyString(m.kdeNotifyCommand, m.envNotifyCommand),
+		}, nil
+	}
+	return detectLinuxSystemProxyBackend()
+}
+
 func detectLinuxSystemProxyBackend() (linuxSystemProxyBackend, error) {
 	if _, err := exec.LookPath("gsettings"); err == nil {
 		return linuxSystemProxyBackend{Name: "gsettings"}, nil
@@ -151,6 +183,15 @@ func firstExecutable(names ...string) string {
 	return ""
 }
 
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func buildLinuxSystemProxyApplyCommands(backend linuxSystemProxyBackend, httpAddr string, socksAddr string) ([]vpnTunCommand, error) {
 	switch backend.Name {
 	case "gsettings":
@@ -161,6 +202,19 @@ func buildLinuxSystemProxyApplyCommands(backend linuxSystemProxyBackend, httpAdd
 		return buildLinuxEnvProxyApplyCommands(backend, httpAddr, socksAddr)
 	default:
 		return nil, errors.New("unsupported linux system proxy backend")
+	}
+}
+
+func buildLinuxSystemProxyClearCommands(backend linuxSystemProxyBackend) []vpnTunCommand {
+	switch backend.Name {
+	case "gsettings":
+		return buildLinuxGSettingsProxyClearCommands()
+	case "kde":
+		return buildLinuxKDEProxyClearCommands(backend.WriteCommand)
+	case "environment":
+		return buildLinuxEnvProxyClearCommands(backend.WriteCommand, backend.NotifyCommand)
+	default:
+		return nil
 	}
 }
 

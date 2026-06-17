@@ -88,6 +88,19 @@ func buildLinuxGSettingsProxyRestoreCommands(states []linuxGSettingsProxyState) 
 	return commands
 }
 
+func buildLinuxGSettingsProxyClearCommands() []vpnTunCommand {
+	return []vpnTunCommand{
+		linuxGSettingsSetCommand("org.gnome.system.proxy.http", "host", "''"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy.http", "port", "0"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy.http", "enabled", "false"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy.https", "host", "''"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy.https", "port", "0"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy.socks", "host", "''"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy.socks", "port", "0"),
+		linuxGSettingsSetCommand("org.gnome.system.proxy", "mode", "'none'"),
+	}
+}
+
 func linuxSplitProxyListen(address string) (string, string, bool, error) {
 	address = strings.TrimSpace(address)
 	if address == "" {
@@ -184,6 +197,29 @@ func buildLinuxEnvProxyRestoreCommands(writeCommand string, notifyCommand string
 		}
 	}
 	if strings.TrimSpace(notifyCommand) != "" && len(dbusAssignments) > 0 {
+		commands = append(commands, vpnTunCommand{
+			Name: notifyCommand,
+			Args: append([]string{"--systemd"}, dbusAssignments...),
+		})
+	}
+	return commands
+}
+
+func buildLinuxEnvProxyClearCommands(writeCommand string, notifyCommand string) []vpnTunCommand {
+	unsetNames := append([]string(nil), linuxEnvProxyKeys...)
+	dbusAssignments := make([]string, 0, len(linuxEnvProxyKeys))
+	for _, name := range linuxEnvProxyKeys {
+		dbusAssignments = append(dbusAssignments, name+"=")
+	}
+
+	var commands []vpnTunCommand
+	if strings.TrimSpace(writeCommand) != "" {
+		commands = append(commands, vpnTunCommand{
+			Name: writeCommand,
+			Args: append([]string{"--user", "unset-environment"}, unsetNames...),
+		})
+	}
+	if strings.TrimSpace(notifyCommand) != "" {
 		commands = append(commands, vpnTunCommand{
 			Name: notifyCommand,
 			Args: append([]string{"--systemd"}, dbusAssignments...),
