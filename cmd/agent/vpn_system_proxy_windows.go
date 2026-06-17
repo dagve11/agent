@@ -334,6 +334,9 @@ func setWindowsRegistryString(key string, name string, value string) error {
 }
 
 func deleteWindowsRegistryValue(key string, name string) error {
+	if readWindowsRegistryValue(key, name) == nil {
+		return nil
+	}
 	err := runWindowsRegistry("delete", key, "/v", name, "/f")
 	if err != nil && isWindowsRegistryMissingValueError(err) {
 		return nil
@@ -348,7 +351,8 @@ func isWindowsRegistryMissingValueError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "unable to find") ||
 		strings.Contains(message, "not found") ||
-		strings.Contains(message, "找不到")
+		strings.Contains(message, "找不到") ||
+		strings.Contains(message, "Ҳ���")
 }
 
 func windowsRegistryKey(root string, subKey string) string {
