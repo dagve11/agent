@@ -41,20 +41,16 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		t.Fatalf("entry system proxy must expose HTTP and SOCKS mixed inbounds, got %#v", inbounds)
 	}
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":                       "mixed",
-		"tag":                        "local-socks",
-		"listen":                     "127.0.0.1",
-		"listen_port":                float64(1080),
-		"sniff":                      true,
-		"sniff_override_destination": true,
+		"type":        "mixed",
+		"tag":         "local-socks",
+		"listen":      "127.0.0.1",
+		"listen_port": float64(1080),
 	})
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":                       "mixed",
-		"tag":                        "local-http",
-		"listen":                     "127.0.0.1",
-		"listen_port":                float64(8088),
-		"sniff":                      true,
-		"sniff_override_destination": true,
+		"type":        "mixed",
+		"tag":         "local-http",
+		"listen":      "127.0.0.1",
+		"listen_port": float64(8088),
 	})
 
 	outbounds := cfg.array("outbounds")
@@ -87,6 +83,9 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		t.Fatalf("route must auto-detect interface to reduce TUN loop risk, got %#v", route)
 	}
 	rules := configObject(route).array("rules")
+	assertObjectWithFieldsForTest(t, rules, map[string]any{
+		"action": "sniff",
+	})
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
 		"outbound": "direct",
 		"domain":   []any{"dashboard.example.com"},
@@ -163,6 +162,9 @@ func TestBuildVPNSingBoxConfigEntryUsesLocalRuleSetsWhenPresent(t *testing.T) {
 
 	rules := route.array("rules")
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
+		"action": "sniff",
+	})
+	assertObjectWithFieldsForTest(t, rules, map[string]any{
 		"outbound": "vpn-rule-match",
 		"domain":   []any{"github.com"},
 	})
@@ -199,12 +201,10 @@ func TestBuildVPNSingBoxConfigExitProvidesLoopbackInbound(t *testing.T) {
 		t.Fatalf("exit side must expose exactly one loopback inbound for Agent bridge, got %#v", inbounds)
 	}
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":                       "socks",
-		"tag":                        "relay-in",
-		"listen":                     "127.0.0.1",
-		"listen_port":                float64(19091),
-		"sniff":                      true,
-		"sniff_override_destination": true,
+		"type":        "socks",
+		"tag":         "relay-in",
+		"listen":      "127.0.0.1",
+		"listen_port": float64(19091),
 	})
 
 	outbounds := cfg.array("outbounds")
@@ -223,6 +223,9 @@ func TestBuildVPNSingBoxConfigExitProvidesLoopbackInbound(t *testing.T) {
 		t.Fatalf("exit side must send accepted bridge traffic directly, got %#v", route["final"])
 	}
 	rules := configObject(route).array("rules")
+	assertObjectWithFieldsForTest(t, rules, map[string]any{
+		"action": "sniff",
+	})
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
 		"outbound": "block",
 		"ip_cidr":  defaultSensitiveCIDRsForTest(),
@@ -254,13 +257,11 @@ func TestBuildVPNSingBoxConfigEntryTunIncludesDNSAndHijackRule(t *testing.T) {
 
 	inbounds := cfg.array("inbounds")
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":                       "tun",
-		"tag":                        "tun-in",
-		"interface_name":             "nezha-vpn",
-		"auto_route":                 true,
-		"strict_route":               true,
-		"sniff":                      true,
-		"sniff_override_destination": true,
+		"type":           "tun",
+		"tag":            "tun-in",
+		"interface_name": "nezha-vpn",
+		"auto_route":     true,
+		"strict_route":   true,
 	})
 	dns := cfg.object("dns")
 	servers := dns.array("servers")
@@ -279,6 +280,9 @@ func TestBuildVPNSingBoxConfigEntryTunIncludesDNSAndHijackRule(t *testing.T) {
 	})
 
 	routeRules := cfg.object("route").array("rules")
+	assertObjectWithFieldsForTest(t, routeRules, map[string]any{
+		"action": "sniff",
+	})
 	assertObjectWithFieldsForTest(t, routeRules, map[string]any{
 		"protocol": "dns",
 		"action":   "hijack-dns",

@@ -35,12 +35,6 @@ const (
 	vpnRuleSetGeoIPCN        = "geoip-cn"
 )
 
-func withVPNSniff(inbound map[string]any) map[string]any {
-	inbound["sniff"] = true
-	inbound["sniff_override_destination"] = true
-	return inbound
-}
-
 var defaultVPNSensitiveCIDRs = []string{
 	"127.0.0.0/8",
 	"10.0.0.0/8",
@@ -154,7 +148,7 @@ func buildVPNEntryInbounds(req model.VPNControlRequest) ([]map[string]any, error
 			tunName = "nezha-vpn"
 		}
 		return []map[string]any{
-			withVPNSniff(map[string]any{
+			{
 				"type":           "tun",
 				"tag":            "tun-in",
 				"interface_name": tunName,
@@ -162,7 +156,7 @@ func buildVPNEntryInbounds(req model.VPNControlRequest) ([]map[string]any, error
 				"auto_route":     true,
 				"strict_route":   true,
 				"stack":          "system",
-			}),
+			},
 		}, nil
 	}
 	return nil, fmt.Errorf("unsupported VPN mode %q", req.Mode)
@@ -181,30 +175,32 @@ func buildVPNSystemProxyInbounds(req model.VPNControlRequest) ([]map[string]any,
 		if err != nil {
 			return nil, fmt.Errorf("invalid SOCKS listen address: %w", err)
 		}
-		inbounds = append(inbounds, withVPNSniff(map[string]any{
+		inbounds = append(inbounds, map[string]any{
 			"type":        "mixed",
 			"tag":         vpnInboundLocalSOCKS,
 			"listen":      host,
 			"listen_port": port,
-		}))
+		})
 	}
 	if listenHTTP != "" {
 		host, port, err := splitListenAddress(listenHTTP)
 		if err != nil {
 			return nil, fmt.Errorf("invalid HTTP listen address: %w", err)
 		}
-		inbounds = append(inbounds, withVPNSniff(map[string]any{
+		inbounds = append(inbounds, map[string]any{
 			"type":        "mixed",
 			"tag":         vpnInboundLocalHTTP,
 			"listen":      host,
 			"listen_port": port,
-		}))
+		})
 	}
 	return inbounds, nil
 }
 
 func buildVPNEntryRoute(req model.VPNControlRequest) map[string]any {
-	rules := []map[string]any{}
+	rules := []map[string]any{
+		buildVPNSniffRule(),
+	}
 	if isVPNTunMode(req.Mode) {
 		rules = append(rules, map[string]any{
 			"protocol": "dns",
@@ -271,6 +267,12 @@ func buildVPNRoute(rules []map[string]any, final string, ruleSets []map[string]a
 		route["rule_set"] = ruleSets
 	}
 	return route
+}
+
+func buildVPNSniffRule() map[string]any {
+	return map[string]any{
+		"action": "sniff",
+	}
 }
 
 func activeVPNRuleSetRouteItems(req model.VPNControlRequest) ([]map[string]any, bool) {
@@ -379,12 +381,12 @@ func buildVPNExitSingBoxConfig(req model.VPNControlRequest) (map[string]any, err
 			"level": vpnSingBoxConfigLogLevel,
 		},
 		"inbounds": []map[string]any{
-			withVPNSniff(map[string]any{
+			{
 				"type":        "socks",
 				"tag":         vpnInboundRelay,
 				"listen":      bridgeHost,
 				"listen_port": bridgePort,
-			}),
+			},
 		},
 		"dns": buildVPNLocalDNS(),
 		"outbounds": []map[string]any{
@@ -397,6 +399,7 @@ func buildVPNExitSingBoxConfig(req model.VPNControlRequest) (map[string]any, err
 		"route": map[string]any{
 			"auto_detect_interface": true,
 			"rules": []map[string]any{
+				buildVPNSniffRule(),
 				buildVPNSensitiveBlockRule(),
 			},
 			"final": vpnOutboundDirect,
