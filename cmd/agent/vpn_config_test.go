@@ -33,6 +33,8 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 	}
 	cfg := decodeSingBoxConfigForTest(t, raw)
 
+	assertLocalDNSForTest(t, cfg)
+
 	inbounds := cfg.array("inbounds")
 	if len(inbounds) != 2 {
 		t.Fatalf("entry system proxy must expose HTTP and SOCKS mixed inbounds, got %#v", inbounds)
@@ -58,9 +60,12 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		"server_port": float64(19090),
 	})
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
-		"type":            "direct",
-		"tag":             "direct",
-		"domain_strategy": "ipv4_only",
+		"type": "direct",
+		"tag":  "direct",
+		"domain_resolver": map[string]any{
+			"server":   "local",
+			"strategy": "ipv4_only",
+		},
 	})
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{"type": "block", "tag": "block"})
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
@@ -124,6 +129,8 @@ func TestBuildVPNSingBoxConfigEntryUsesLocalRuleSetsWhenPresent(t *testing.T) {
 	}
 	cfg := decodeSingBoxConfigForTest(t, raw)
 
+	assertLocalDNSForTest(t, cfg)
+
 	outbounds := cfg.array("outbounds")
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
 		"type":    "selector",
@@ -180,6 +187,8 @@ func TestBuildVPNSingBoxConfigExitProvidesLoopbackInbound(t *testing.T) {
 	}
 	cfg := decodeSingBoxConfigForTest(t, raw)
 
+	assertLocalDNSForTest(t, cfg)
+
 	inbounds := cfg.array("inbounds")
 	if len(inbounds) != 1 {
 		t.Fatalf("exit side must expose exactly one loopback inbound for Agent bridge, got %#v", inbounds)
@@ -193,9 +202,12 @@ func TestBuildVPNSingBoxConfigExitProvidesLoopbackInbound(t *testing.T) {
 
 	outbounds := cfg.array("outbounds")
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
-		"type":            "direct",
-		"tag":             "direct",
-		"domain_strategy": "ipv4_only",
+		"type": "direct",
+		"tag":  "direct",
+		"domain_resolver": map[string]any{
+			"server":   "local",
+			"strategy": "ipv4_only",
+		},
 	})
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{"type": "block", "tag": "block"})
 
@@ -247,10 +259,14 @@ func TestBuildVPNSingBoxConfigEntryTunIncludesDNSAndHijackRule(t *testing.T) {
 		"tag":     "remote",
 		"address": "https://1.1.1.1/dns-query",
 	})
+	assertObjectWithFieldsForTest(t, servers, map[string]any{
+		"type": "local",
+		"tag":  "local",
+	})
 	rules := dns.array("rules")
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
 		"domain": []any{"dashboard.example.com"},
-		"server": "direct",
+		"server": "local",
 	})
 
 	routeRules := cfg.object("route").array("rules")
@@ -297,6 +313,17 @@ func TestBuildVPNSingBoxConfigPlacesDashboardBypassBeforeSensitiveBlock(t *testi
 
 func defaultSensitiveCIDRsForTest() []any {
 	return []any{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "169.254.169.254/32", "::1/128", "fc00::/7", "fe80::/10"}
+}
+
+func assertLocalDNSForTest(t *testing.T, cfg configObject) {
+	t.Helper()
+
+	dns := cfg.object("dns")
+	servers := dns.array("servers")
+	assertObjectWithFieldsForTest(t, servers, map[string]any{
+		"type": "local",
+		"tag":  "local",
+	})
 }
 
 type configObject map[string]any

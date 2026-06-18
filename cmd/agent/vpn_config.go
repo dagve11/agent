@@ -29,6 +29,7 @@ const (
 	vpnInboundLocalHTTP      = "local-http"
 	vpnInboundLocalSOCKS     = "local-socks"
 	vpnInboundRelay          = "relay-in"
+	vpnDNSLocal              = "local"
 	vpnSingBoxConfigLogLevel = "warn"
 	vpnRuleSetGeositeCN      = "geosite-cn"
 	vpnRuleSetGeoIPCN        = "geoip-cn"
@@ -85,6 +86,7 @@ func buildVPNEntrySingBoxConfig(req model.VPNControlRequest) (map[string]any, er
 		"inbounds":  inbounds,
 		"outbounds": buildVPNEntryOutbounds(req, bridgeHost, bridgePort),
 		"route":     buildVPNEntryRoute(req),
+		"dns":       buildVPNEntryDNS(req),
 	}
 	if runtimeAPI := vpnRuntimeControlAddress(req); runtimeAPI != "" {
 		cfg["experimental"] = map[string]any{
@@ -92,9 +94,6 @@ func buildVPNEntrySingBoxConfig(req model.VPNControlRequest) (map[string]any, er
 				"external_controller": runtimeAPI,
 			},
 		}
-	}
-	if isVPNTunMode(req.Mode) {
-		cfg["dns"] = buildVPNTunDNS(req)
 	}
 	return cfg, nil
 }
@@ -121,9 +120,12 @@ func buildVPNEntryOutbounds(req model.VPNControlRequest, bridgeHost string, brid
 
 func buildVPNDirectOutbound() map[string]any {
 	return map[string]any{
-		"type":            "direct",
-		"tag":             vpnOutboundDirect,
-		"domain_strategy": "ipv4_only",
+		"type": "direct",
+		"tag":  vpnOutboundDirect,
+		"domain_resolver": map[string]any{
+			"server":   vpnDNSLocal,
+			"strategy": "ipv4_only",
+		},
 	}
 }
 
@@ -303,17 +305,35 @@ func vpnRuleSetDirFromRequest(req model.VPNControlRequest) string {
 	return filepath.Join(defaultVPNSessionCoreCleanupDir(vpnCoreSessionIDFromRequest(req)), "rules")
 }
 
+func buildVPNEntryDNS(req model.VPNControlRequest) map[string]any {
+	if isVPNTunMode(req.Mode) {
+		return buildVPNTunDNS(req)
+	}
+	return buildVPNLocalDNS()
+}
+
+func buildVPNLocalDNS() map[string]any {
+	return map[string]any{
+		"servers": []map[string]any{
+			buildVPNLocalDNSServer(),
+		},
+	}
+}
+
+func buildVPNLocalDNSServer() map[string]any {
+	return map[string]any{
+		"type": "local",
+		"tag":  vpnDNSLocal,
+	}
+}
+
 func buildVPNTunDNS(req model.VPNControlRequest) map[string]any {
 	if req.Rules.Mode == model.VPNRuleModeDirect {
 		return map[string]any{
 			"servers": []map[string]any{
-				{
-					"tag":     "direct",
-					"address": "local",
-					"detour":  vpnOutboundDirect,
-				},
+				buildVPNLocalDNSServer(),
 			},
-			"final": "direct",
+			"final": vpnDNSLocal,
 		}
 	}
 
@@ -326,7 +346,7 @@ func buildVPNTunDNS(req model.VPNControlRequest) map[string]any {
 	if len(directDomains) > 0 {
 		rules = append(rules, map[string]any{
 			"domain": directDomains,
-			"server": "direct",
+			"server": vpnDNSLocal,
 		})
 	}
 	return map[string]any{
@@ -336,11 +356,7 @@ func buildVPNTunDNS(req model.VPNControlRequest) map[string]any {
 				"address": server,
 				"detour":  vpnOutboundExit,
 			},
-			{
-				"tag":     "direct",
-				"address": "local",
-				"detour":  vpnOutboundDirect,
-			},
+			buildVPNLocalDNSServer(),
 		},
 		"rules": rules,
 		"final": "remote",
@@ -364,6 +380,7 @@ func buildVPNExitSingBoxConfig(req model.VPNControlRequest) (map[string]any, err
 				"listen_port": bridgePort,
 			},
 		},
+		"dns": buildVPNLocalDNS(),
 		"outbounds": []map[string]any{
 			buildVPNDirectOutbound(),
 			{
