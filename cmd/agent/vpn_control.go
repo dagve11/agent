@@ -1347,6 +1347,9 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 func (m *AgentVPNManager) CleanupStaleSessions() {
 	states := loadAgentVPNSessionStates(m.effectiveWorkDir())
 	for _, state := range states {
+		if m.staleStateBelongsToActiveSession(state) {
+			continue
+		}
 		if state.SystemProxyApplied && m.systemProxyManager != nil {
 			if err := m.systemProxyManager.Restore(); err != nil {
 				printf("VPN stale system proxy restore failed for session %s: %v", state.SessionID, err)
@@ -1394,6 +1397,30 @@ func (m *AgentVPNManager) CleanupStaleSessions() {
 			printf("VPN stale session state remove failed for session %s: %v", state.SessionID, err)
 		}
 	}
+}
+
+func (m *AgentVPNManager) staleStateBelongsToActiveSession(state agentVPNSessionState) bool {
+	if m == nil || strings.TrimSpace(state.SessionID) == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if session := m.sessions[state.SessionID]; session != nil {
+		return true
+	}
+	for _, runtime := range m.sharedExitRuntimes {
+		if runtime == nil {
+			continue
+		}
+		if _, ok := runtime.refs[state.SessionID]; ok {
+			return true
+		}
+		if state.SidecarPID > 0 && runtime.sidecarPID == state.SidecarPID {
+			return true
+		}
+	}
+	return false
 }
 
 func isStaleSidecarAlreadyGone(err error) bool {

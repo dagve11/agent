@@ -132,6 +132,10 @@ func GetHost() *model.Host {
 		ret.VPNDirectListenPort = cfg.VPNDirectListenPort
 		ret.VPNDirectAdvertise = cfg.VPNDirectAdvertise
 		ret.VPNDirectCertSHA256 = cfg.VPNDirectCertSHA256
+		if cfg.VPNDirectEnabled {
+			ret.VPNDirectTransports = []string{model.VPNDirectTransportTCPTLS, model.VPNDirectTransportWSTLS}
+			ret.VPNDirectCrypto = model.VPNDirectCryptoV2
+		}
 	}
 
 	return &ret

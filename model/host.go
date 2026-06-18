@@ -80,30 +80,34 @@ type Host struct {
 	VPNDirectListenPort uint32
 	VPNDirectAdvertise  string
 	VPNDirectCertSHA256 string
+	VPNDirectTransports []string
+	VPNDirectCrypto     string
 }
 
 func (h *Host) PB() *pb.Host {
 	return &pb.Host{
-		Platform:            h.Platform,
-		PlatformVersion:     h.PlatformVersion,
-		Cpu:                 h.CPU,
-		MemTotal:            h.MemTotal,
-		DiskTotal:           h.DiskTotal,
-		SwapTotal:           h.SwapTotal,
-		Arch:                h.Arch,
-		Virtualization:      h.Virtualization,
-		BootTime:            h.BootTime,
-		Version:             h.Version,
-		Gpu:                 h.GPU,
-		VpnEnabled:          h.VPNEnabled,
-		VpnAllowSystemProxy: h.VPNAllowSystemProxy,
-		VpnAllowTun:         h.VPNAllowTun,
-		VpnCoreVersion:      h.VPNCoreVersion,
-		VpnLastError:        h.VPNLastError,
-		VpnDirectEnabled:    h.VPNDirectEnabled,
-		VpnDirectListenPort: h.VPNDirectListenPort,
-		VpnDirectAdvertise:  h.VPNDirectAdvertise,
-		VpnDirectCertSha256: h.VPNDirectCertSHA256,
+		Platform:               h.Platform,
+		PlatformVersion:        h.PlatformVersion,
+		Cpu:                    h.CPU,
+		MemTotal:               h.MemTotal,
+		DiskTotal:              h.DiskTotal,
+		SwapTotal:              h.SwapTotal,
+		Arch:                   h.Arch,
+		Virtualization:         h.Virtualization,
+		BootTime:               h.BootTime,
+		Version:                h.Version,
+		Gpu:                    h.GPU,
+		VpnEnabled:             h.VPNEnabled,
+		VpnAllowSystemProxy:    h.VPNAllowSystemProxy,
+		VpnAllowTun:            h.VPNAllowTun,
+		VpnCoreVersion:         h.VPNCoreVersion,
+		VpnLastError:           h.VPNLastError,
+		VpnDirectEnabled:       h.VPNDirectEnabled,
+		VpnDirectListenPort:    h.VPNDirectListenPort,
+		VpnDirectAdvertise:     h.VPNDirectAdvertise,
+		VpnDirectCertSha256:    h.VPNDirectCertSHA256,
+		VpnDirectTransports:    h.VPNDirectTransports,
+		VpnDirectCryptoVersion: h.VPNDirectCrypto,
 	}
 }
 

@@ -327,6 +327,7 @@ func run(stop <-chan struct{}) {
 	var err error
 	var dashboardBootTimeReceipt *pb.Uint64Receipt
 	var conn *grpc.ClientConn
+	vpnStaleCleanupDone := false
 
 	retry := func() {
 		initialized = false
@@ -398,8 +399,13 @@ func run(stop <-chan struct{}) {
 		prevDashboardBootTime = dashboardBootTimeReceipt.GetData()
 		initialized = true
 
-		// 清理启动前残留的 VPN 会话（Agent 崩溃后的孤儿进程）
-		vpnManager.CleanupStaleSessions()
+		// 清理启动前残留的 VPN 会话（Agent 崩溃后的孤儿进程）。
+		// 只在本进程首次成功连接面板后执行；任务流重连时内存里的会话仍在运行，
+		// 不能把对应的 state.json 当作崩溃残留清理。
+		if !vpnStaleCleanupDone {
+			vpnManager.CleanupStaleSessions()
+			vpnStaleCleanupDone = true
+		}
 
 		wCtx, wCancel := context.WithCancel(context.Background())
 

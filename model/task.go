@@ -72,6 +72,13 @@ const (
 )
 
 const (
+	VPNDirectTransportTCPTLS = "tcp_tls"
+	VPNDirectTransportWSTLS  = "ws_tls"
+	VPNDirectCryptoLegacy    = "legacy"
+	VPNDirectCryptoV2        = "direct_v2"
+)
+
+const (
 	VPNRuleModeGlobal = "global"
 	VPNRuleModeDomain = "domain"
 	VPNRuleModeIP     = "ip"

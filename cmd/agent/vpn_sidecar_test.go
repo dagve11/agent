@@ -1375,6 +1375,119 @@ func TestAgentVPNCleanupStaleSessionsRestoresSystemProxyAndRemovesState(t *testi
 	}
 }
 
+func TestAgentVPNCleanupStaleSessionsSkipsActiveTrackedSession(t *testing.T) {
+	resetVPNManagerForTest(t)
+	proxy := &recordingVPNSystemProxyManager{}
+	vpnManager.systemProxyManager = proxy
+
+	killedPIDs := make([]int, 0, 1)
+	vpnManager.staleSidecarKiller = func(pid int) error {
+		killedPIDs = append(killedPIDs, pid)
+		return nil
+	}
+
+	const sessionID = "vpn-active-session"
+	statePath := vpnSessionStatePath(vpnManager.effectiveWorkDir(), sessionID)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	state := agentVPNSessionState{
+		Version:            1,
+		SessionID:          sessionID,
+		Role:               model.VPNRoleEntry,
+		Mode:               model.VPNModeSystemProxy,
+		State:              model.VPNStateRunning,
+		SidecarPID:         424242,
+		SystemProxyApplied: true,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	vpnManager.mu.Lock()
+	vpnManager.sessions[sessionID] = &AgentVPNSession{
+		Request: model.VPNControlRequest{
+			SessionID: sessionID,
+			Role:      model.VPNRoleEntry,
+			Mode:      model.VPNModeSystemProxy,
+		},
+		State:              model.VPNStateRunning,
+		StatePath:          statePath,
+		sidecarPID:         state.SidecarPID,
+		systemProxyApplied: true,
+	}
+	vpnManager.mu.Unlock()
+
+	vpnManager.CleanupStaleSessions()
+
+	if proxy.restoreCalls != 0 {
+		t.Fatalf("active session stale cleanup must not restore system proxy, got %d", proxy.restoreCalls)
+	}
+	if len(killedPIDs) != 0 {
+		t.Fatalf("active session stale cleanup must not kill sidecar, got %#v", killedPIDs)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("active session state must be kept, stat err=%v", err)
+	}
+	if _, ok := vpnManager.Get(sessionID); !ok {
+		t.Fatal("active session must remain tracked after stale cleanup")
+	}
+}
+
+func TestAgentVPNCleanupStaleSessionsSkipsActiveSharedExitRuntime(t *testing.T) {
+	resetVPNManagerForTest(t)
+
+	killedPIDs := make([]int, 0, 1)
+	vpnManager.staleSidecarKiller = func(pid int) error {
+		killedPIDs = append(killedPIDs, pid)
+		return nil
+	}
+
+	const sessionID = "vpn-active-shared-exit-session"
+	statePath := vpnSessionStatePath(vpnManager.effectiveWorkDir(), sessionID)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	state := agentVPNSessionState{
+		Version:    1,
+		SessionID:  sessionID,
+		Role:       model.VPNRoleExit,
+		Mode:       model.VPNModeSystemProxy,
+		State:      model.VPNStateRunning,
+		SidecarPID: 525252,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	vpnManager.mu.Lock()
+	vpnManager.sharedExitRuntimes["test-core"] = &agentVPNSharedExitRuntime{
+		Key:        "test-core",
+		sidecarPID: state.SidecarPID,
+		refs: map[string]struct{}{
+			sessionID: {},
+		},
+	}
+	vpnManager.mu.Unlock()
+
+	vpnManager.CleanupStaleSessions()
+
+	if len(killedPIDs) != 0 {
+		t.Fatalf("active shared exit stale cleanup must not kill sidecar, got %#v", killedPIDs)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("active shared exit state must be kept, stat err=%v", err)
+	}
+}
+
 func TestAgentVPNCleanupStaleSessionsRestoresTunSnapshot(t *testing.T) {
 	resetVPNManagerForTest(t)
 	tun := &recordingVPNTunManager{}
