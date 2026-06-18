@@ -24,6 +24,7 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		DashboardBypass: []string{"dashboard.example.com", "203.0.113.10"},
 		Extra: map[string]string{
 			"bridge_addr": "127.0.0.1:19090",
+			"rules_dir":   t.TempDir(),
 		},
 	}
 
@@ -40,16 +41,20 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		t.Fatalf("entry system proxy must expose HTTP and SOCKS mixed inbounds, got %#v", inbounds)
 	}
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":        "mixed",
-		"tag":         "local-socks",
-		"listen":      "127.0.0.1",
-		"listen_port": float64(1080),
+		"type":                       "mixed",
+		"tag":                        "local-socks",
+		"listen":                     "127.0.0.1",
+		"listen_port":                float64(1080),
+		"sniff":                      true,
+		"sniff_override_destination": true,
 	})
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":        "mixed",
-		"tag":         "local-http",
-		"listen":      "127.0.0.1",
-		"listen_port": float64(8088),
+		"type":                       "mixed",
+		"tag":                        "local-http",
+		"listen":                     "127.0.0.1",
+		"listen_port":                float64(8088),
+		"sniff":                      true,
+		"sniff_override_destination": true,
 	})
 
 	outbounds := cfg.array("outbounds")
@@ -194,10 +199,12 @@ func TestBuildVPNSingBoxConfigExitProvidesLoopbackInbound(t *testing.T) {
 		t.Fatalf("exit side must expose exactly one loopback inbound for Agent bridge, got %#v", inbounds)
 	}
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":        "socks",
-		"tag":         "relay-in",
-		"listen":      "127.0.0.1",
-		"listen_port": float64(19091),
+		"type":                       "socks",
+		"tag":                        "relay-in",
+		"listen":                     "127.0.0.1",
+		"listen_port":                float64(19091),
+		"sniff":                      true,
+		"sniff_override_destination": true,
 	})
 
 	outbounds := cfg.array("outbounds")
@@ -247,11 +254,13 @@ func TestBuildVPNSingBoxConfigEntryTunIncludesDNSAndHijackRule(t *testing.T) {
 
 	inbounds := cfg.array("inbounds")
 	assertObjectWithFieldsForTest(t, inbounds, map[string]any{
-		"type":           "tun",
-		"tag":            "tun-in",
-		"interface_name": "nezha-vpn",
-		"auto_route":     true,
-		"strict_route":   true,
+		"type":                       "tun",
+		"tag":                        "tun-in",
+		"interface_name":             "nezha-vpn",
+		"auto_route":                 true,
+		"strict_route":               true,
+		"sniff":                      true,
+		"sniff_override_destination": true,
 	})
 	dns := cfg.object("dns")
 	servers := dns.array("servers")
