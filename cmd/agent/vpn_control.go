@@ -310,6 +310,9 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	if session.sharedExitRuntimeKey == "" {
 		m.watchSidecar(req.SessionID, sidecar)
 	}
+	if req.RelayMode == model.VPNRelayModeDirect {
+		m.watchBridge(req.SessionID, bridge)
+	}
 	m.watchSidecarLogs(sessionCtx, req.SessionID, session.LogPath)
 	if req.RelayMode == model.VPNRelayModeDirect && req.Role == model.VPNRoleEntry {
 		m.watchDirectTraffic(sessionCtx, req.SessionID)
@@ -851,6 +854,9 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 	}
 	attachVPNBridgeStats(&payload, session.bridge)
 	payload.Logs = readVPNLogTail(session.LogPath, 200)
+	if req.Action == model.VPNActionLogs {
+		return payload, nil
+	}
 	m.attachStatusFileState(&payload, req, session)
 	return payload, nil
 }
@@ -1269,6 +1275,46 @@ func (m *AgentVPNManager) watchSidecar(sessionID string, sidecar *AgentVPNSideca
 	}()
 }
 
+func (m *AgentVPNManager) watchBridge(sessionID string, bridge *AgentVPNBridge) {
+	if bridge == nil || bridge.Done() == nil {
+		return
+	}
+	go func() {
+		err, ok := <-bridge.Done()
+		if !ok || err == nil {
+			return
+		}
+		m.markBridgeFailed(sessionID, fmt.Errorf("VPN bridge relay closed: %w", err))
+	}()
+}
+
+func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error) {
+	if err == nil {
+		return
+	}
+	m.mu.Lock()
+	session := m.sessions[sessionID]
+	if session == nil {
+		m.mu.Unlock()
+		return
+	}
+	sidecar := session.sidecar
+	sidecarPID := vpnTrackedSessionSidecarPID(session)
+	sharedExitRuntime := session.sharedExitRuntimeKey != ""
+	m.mu.Unlock()
+
+	m.markSessionFailed(sessionID, err)
+
+	if sharedExitRuntime {
+		_ = m.releaseSharedExitRuntime(session)
+	} else if sidecar != nil {
+		if stopErr := sidecar.Stop(); stopErr != nil && !isStaleSidecarAlreadyGone(stopErr) {
+			printf("VPN bridge sidecar stop failed: %v", stopErr)
+		}
+		_ = m.cleanupSessionSidecarProcess(session, sidecarPID)
+	}
+}
+
 func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 	if err == nil {
 		return
@@ -1276,6 +1322,10 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 	m.mu.Lock()
 	session := m.sessions[sessionID]
 	if session == nil {
+		m.mu.Unlock()
+		return
+	}
+	if session.State == model.VPNStateFailed {
 		m.mu.Unlock()
 		return
 	}
@@ -1291,9 +1341,10 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 	if cancel != nil {
 		cancel()
 	}
+	var systemProxyRestoreErr error
 	if systemProxyApplied {
-		if restoreErr := m.restoreSessionSystemProxy(session); restoreErr != nil {
-			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+restoreErr.Error())
+		if systemProxyRestoreErr = m.restoreSessionSystemProxy(session); systemProxyRestoreErr != nil {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
 		} else {
 			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
 		}
@@ -1322,11 +1373,16 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 		}
 	}
 	m.mu.Lock()
-	session.State = model.VPNStateFailed
-	result := m.failedTaskResultLocked(session)
 	if current := m.sessions[sessionID]; current == session {
-		delete(m.sessions, sessionID)
+		session.State = model.VPNStateFailed
+		session.cancel = nil
+		session.relay = nil
+		session.bridge = nil
+		if systemProxyApplied && systemProxyRestoreErr == nil {
+			session.systemProxyApplied = false
+		}
 	}
+	result := m.failedTaskResultLocked(session)
 	m.mu.Unlock()
 	if result != nil && len(cleanupLogs) > 0 {
 		var payload model.VPNControlResult

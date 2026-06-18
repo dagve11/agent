@@ -93,6 +93,62 @@ func TestHandleVPNControlStartAttachesDashboardRelayStream(t *testing.T) {
 	}
 }
 
+func TestAgentVPNDirectBridgeFailureMarksSessionFailed(t *testing.T) {
+	resetVPNManagerForTest(t)
+	results := make(chan *pb.TaskResult, 1)
+	vpnManager.SetTaskResultSender(func(result *pb.TaskResult) error {
+		results <- result
+		return nil
+	})
+
+	stream := &recordingVPNIOStream{}
+	bridge := &AgentVPNBridge{done: make(chan error, 1)}
+	session := &AgentVPNSession{
+		Request: model.VPNControlRequest{
+			SessionID: "vpn-direct-session",
+			Action:    model.VPNActionStart,
+			Role:      model.VPNRoleEntry,
+			RelayMode: model.VPNRelayModeDirect,
+		},
+		State:  model.VPNStateRunning,
+		relay:  stream,
+		bridge: bridge,
+	}
+	vpnManager.mu.Lock()
+	vpnManager.sessions[session.Request.SessionID] = session
+	vpnManager.mu.Unlock()
+
+	vpnManager.watchBridge(session.Request.SessionID, bridge)
+	bridge.finish(io.ErrUnexpectedEOF)
+
+	select {
+	case result := <-results:
+		if result.GetSuccessful() {
+			t.Fatal("direct bridge failure must emit unsuccessful TaskResult")
+		}
+		var payload model.VPNControlResult
+		if err := json.Unmarshal([]byte(result.GetData()), &payload); err != nil {
+			t.Fatalf("decode failed direct bridge payload: %v", err)
+		}
+		if payload.State != model.VPNStateFailed || !strings.Contains(payload.LastError, "VPN bridge relay closed") {
+			t.Fatalf("unexpected direct bridge failure payload: %#v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct bridge failure must emit failed VPN TaskResult")
+	}
+
+	got, ok := vpnManager.Get(session.Request.SessionID)
+	if !ok || got.State != model.VPNStateFailed {
+		t.Fatalf("direct bridge failure must keep failed session state, got ok=%t session=%#v", ok, got)
+	}
+	stream.mu.Lock()
+	closed := stream.closed
+	stream.mu.Unlock()
+	if !closed {
+		t.Fatal("direct bridge failure must close relay stream")
+	}
+}
+
 func TestAgentVPNManagersRouteLocalTrafficThroughDashboardRelay(t *testing.T) {
 	originalConfig := agentConfig
 	agentConfig = model.AgentConfig{VPNAllowSystemProxy: true, VPNAllowTun: true}

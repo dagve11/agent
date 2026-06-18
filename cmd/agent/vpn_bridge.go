@@ -23,9 +23,11 @@ const vpnMuxFrameTypeClose byte = 3
 var vpnMuxFrameMagic = [4]byte{'N', 'Z', 'V', 'M'}
 
 type AgentVPNBridge struct {
-	cancel context.CancelFunc
-	close  func() error
-	stats  *vpnBridgeStats
+	cancel   context.CancelFunc
+	close    func() error
+	stats    *vpnBridgeStats
+	done     chan error
+	doneOnce sync.Once
 }
 
 type vpnBridgeStats struct {
@@ -62,13 +64,25 @@ func startAgentVPNEntryBridge(ctx context.Context, req model.VPNControlRequest, 
 	bridge := &AgentVPNBridge{
 		cancel: cancel,
 		stats:  stats,
+		done:   make(chan error, 1),
 	}
 	mux := newVPNMuxBridge(ctx, newVPNRelayByteStream(stream), nil, stats)
+	mux.onError = func(err error) {
+		bridge.finish(err)
+		_ = bridge.Close()
+	}
 	bridge.close = func() error {
 		_ = ln.Close()
 		return mux.Close()
 	}
-	go mux.runReadLoop()
+	go func() {
+		if err := mux.runReadLoop(); err != nil {
+			bridge.finish(err)
+			_ = bridge.Close()
+			return
+		}
+		bridge.finish(nil)
+	}()
 	go func() {
 		defer bridge.Close()
 		var active sync.WaitGroup
@@ -85,11 +99,13 @@ func startAgentVPNEntryBridge(ctx context.Context, req model.VPNControlRequest, 
 			if err != nil {
 				return
 			}
-			if activeCount.Load() >= maxConnections {
-				_ = conn.Close()
+			currentCount := activeCount.Add(1)
+			if currentCount > maxConnections || int32(mux.connCount()) >= maxConnections {
+				activeCount.Add(-1)
+				rejectVPNBridgeConn(conn)
 				continue
 			}
-			stats.activeConns.Store(uint32(activeCount.Add(1)))
+			stats.activeConns.Store(uint32(currentCount))
 			active.Add(1)
 			go func() {
 				defer active.Done()
@@ -113,6 +129,13 @@ func startAgentVPNEntryBridge(ctx context.Context, req model.VPNControlRequest, 
 	return bridge, nil
 }
 
+func rejectVPNBridgeConn(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetLinger(0)
+	}
+	_ = conn.Close()
+}
+
 func startAgentVPNExitBridge(ctx context.Context, req model.VPNControlRequest, stream vpnIOStream) (*AgentVPNBridge, error) {
 	addr := firstNonEmpty(req.Extra["bridge_listen"], defaultVPNExitBridge)
 	ctx, cancel := context.WithCancel(ctx)
@@ -122,8 +145,20 @@ func startAgentVPNExitBridge(ctx context.Context, req model.VPNControlRequest, s
 	bridge := &AgentVPNBridge{
 		cancel: cancel,
 		close:  mux.Close,
+		done:   make(chan error, 1),
 	}
-	go mux.runReadLoop()
+	mux.onError = func(err error) {
+		bridge.finish(err)
+		_ = bridge.Close()
+	}
+	go func() {
+		if err := mux.runReadLoop(); err != nil {
+			bridge.finish(err)
+			_ = bridge.Close()
+			return
+		}
+		bridge.finish(nil)
+	}()
 	return bridge, nil
 }
 
@@ -155,9 +190,29 @@ func (b *AgentVPNBridge) Close() error {
 		b.cancel()
 	}
 	if b.close != nil {
-		return b.close()
+		err := b.close()
+		b.finish(nil)
+		return err
 	}
+	b.finish(nil)
 	return nil
+}
+
+func (b *AgentVPNBridge) Done() <-chan error {
+	if b == nil {
+		return nil
+	}
+	return b.done
+}
+
+func (b *AgentVPNBridge) finish(err error) {
+	if b == nil || b.done == nil {
+		return
+	}
+	b.doneOnce.Do(func() {
+		b.done <- err
+		close(b.done)
+	})
 }
 
 func bridgeVPNRelayStreamToConn(ctx context.Context, stream vpnIOStream, conn net.Conn) error {
@@ -289,11 +344,13 @@ type vpnMuxBridge struct {
 	rw          io.ReadWriteCloser
 	stats       *vpnBridgeStats
 	sendMu      sync.Mutex
+	failOnce    sync.Once
 	mu          sync.Mutex
 	conns       map[uint64]net.Conn
 	nextID      atomic.Uint64
 	idleTimeout time.Duration
 	dialTarget  func(context.Context) (net.Conn, error)
+	onError     func(error)
 }
 
 func newVPNMuxBridge(ctx context.Context, rw io.ReadWriteCloser, dialTarget func(context.Context) (net.Conn, error), stats *vpnBridgeStats) *vpnMuxBridge {
@@ -332,6 +389,12 @@ func (m *vpnMuxBridge) getConn(id uint64) net.Conn {
 	return m.conns[id]
 }
 
+func (m *vpnMuxBridge) connCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.conns)
+}
+
 func (m *vpnMuxBridge) removeConn(id uint64) (net.Conn, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -368,17 +431,33 @@ func (m *vpnMuxBridge) Close() error {
 	return nil
 }
 
-func (m *vpnMuxBridge) runReadLoop() {
+func (m *vpnMuxBridge) fail(err error) {
+	if m == nil || err == nil {
+		return
+	}
+	m.failOnce.Do(func() {
+		if m.onError != nil && m.ctx.Err() == nil {
+			m.onError(err)
+		}
+	})
+	_ = m.Close()
+}
+
+func (m *vpnMuxBridge) runReadLoop() error {
+	defer m.Close()
 	for {
 		select {
 		case <-m.ctx.Done():
-			return
+			return nil
 		default:
 		}
 		frame, err := readVPNMuxFrame(m.rw)
 		if err != nil {
-			_ = m.Close()
-			return
+			if m.ctx.Err() != nil {
+				return nil
+			}
+			m.fail(err)
+			return err
 		}
 		m.handleFrame(frame)
 	}
@@ -462,7 +541,11 @@ func refreshVPNConnDeadline(conn net.Conn, idleTimeout time.Duration) {
 func (m *vpnMuxBridge) sendFrame(frameType byte, connID uint64, payload []byte) error {
 	m.sendMu.Lock()
 	defer m.sendMu.Unlock()
-	return writeVPNMuxFrame(m.rw, vpnMuxFrame{Type: frameType, ConnID: connID, Payload: payload})
+	err := writeVPNMuxFrame(m.rw, vpnMuxFrame{Type: frameType, ConnID: connID, Payload: payload})
+	if err != nil && m.ctx.Err() == nil {
+		m.fail(err)
+	}
+	return err
 }
 
 func writeVPNMuxFrame(writer io.Writer, frame vpnMuxFrame) error {
