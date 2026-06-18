@@ -123,7 +123,7 @@ func buildVPNDirectOutbound() map[string]any {
 	return map[string]any{
 		"type":            "direct",
 		"tag":             vpnOutboundDirect,
-		"domain_strategy": "prefer_ipv4",
+		"domain_strategy": "ipv4_only",
 	}
 }
 

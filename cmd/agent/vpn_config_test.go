@@ -57,12 +57,21 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		"server":      "127.0.0.1",
 		"server_port": float64(19090),
 	})
-	assertObjectWithFieldsForTest(t, outbounds, map[string]any{"type": "direct", "tag": "direct"})
+	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
+		"type":            "direct",
+		"tag":             "direct",
+		"domain_strategy": "ipv4_only",
+	})
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{"type": "block", "tag": "block"})
+	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
+		"type":    "selector",
+		"tag":     "vpn-mode",
+		"default": "direct",
+	})
 
 	route := cfg.object("route")
-	if route["final"] != "direct" {
-		t.Fatalf("domain rule mode must default unmatched traffic to direct, got %#v", route["final"])
+	if route["final"] != "vpn-mode" {
+		t.Fatalf("domain rule mode must route unmatched traffic through vpn-mode selector, got %#v", route["final"])
 	}
 	if route["auto_detect_interface"] != true {
 		t.Fatalf("route must auto-detect interface to reduce TUN loop risk, got %#v", route)
@@ -77,7 +86,7 @@ func TestBuildVPNSingBoxConfigEntrySystemProxyUsesLocalBridgeAndRules(t *testing
 		"ip_cidr":  []any{"203.0.113.10/32", "198.51.100.0/24"},
 	})
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
-		"outbound": "vpn-exit",
+		"outbound": "vpn-rule-match",
 		"domain":   []any{"github.com", "api.github.com"},
 	})
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
@@ -115,9 +124,16 @@ func TestBuildVPNSingBoxConfigEntryUsesLocalRuleSetsWhenPresent(t *testing.T) {
 	}
 	cfg := decodeSingBoxConfigForTest(t, raw)
 
+	outbounds := cfg.array("outbounds")
+	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
+		"type":    "selector",
+		"tag":     "vpn-mode",
+		"default": "vpn-exit",
+	})
+
 	route := cfg.object("route")
-	if route["final"] != "vpn-exit" {
-		t.Fatalf("rule-set routing must default unmatched traffic to vpn-exit, got %#v", route["final"])
+	if route["final"] != "vpn-mode" {
+		t.Fatalf("rule-set routing must route unmatched traffic through vpn-mode selector, got %#v", route["final"])
 	}
 	ruleSets := route.array("rule_set")
 	assertObjectWithFieldsForTest(t, ruleSets, map[string]any{
@@ -135,15 +151,15 @@ func TestBuildVPNSingBoxConfigEntryUsesLocalRuleSetsWhenPresent(t *testing.T) {
 
 	rules := route.array("rules")
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
-		"outbound": "vpn-exit",
+		"outbound": "vpn-rule-match",
 		"domain":   []any{"github.com"},
 	})
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
-		"outbound": "direct",
+		"outbound": "vpn-rule-direct",
 		"rule_set": "geosite-cn",
 	})
 	assertObjectWithFieldsForTest(t, rules, map[string]any{
-		"outbound": "direct",
+		"outbound": "vpn-rule-direct",
 		"rule_set": "geoip-cn",
 	})
 }
@@ -176,7 +192,11 @@ func TestBuildVPNSingBoxConfigExitProvidesLoopbackInbound(t *testing.T) {
 	})
 
 	outbounds := cfg.array("outbounds")
-	assertObjectWithFieldsForTest(t, outbounds, map[string]any{"type": "direct", "tag": "direct"})
+	assertObjectWithFieldsForTest(t, outbounds, map[string]any{
+		"type":            "direct",
+		"tag":             "direct",
+		"domain_strategy": "ipv4_only",
+	})
 	assertObjectWithFieldsForTest(t, outbounds, map[string]any{"type": "block", "tag": "block"})
 
 	route := cfg.object("route")
