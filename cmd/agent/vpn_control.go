@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nezhahq/agent/model"
 	pb "github.com/nezhahq/agent/proto"
@@ -83,6 +84,11 @@ const (
 )
 
 var vpnManager = NewAgentVPNManager()
+
+const (
+	vpnLogReadMaxBytes = 256 * 1024
+	vpnLogLineMaxBytes = 8 * 1024
+)
 
 func NewAgentVPNManager() *AgentVPNManager {
 	return &AgentVPNManager{
@@ -1963,23 +1969,35 @@ func readVPNLogLinesSince(path string, offset int64) ([]string, int64) {
 	if offset == size {
 		return nil, offset
 	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+	readOffset := offset
+	skipped := int64(0)
+	if unread := size - offset; unread > vpnLogReadMaxBytes {
+		readOffset = size - vpnLogReadMaxBytes
+		skipped = readOffset - offset
+	}
+	if _, err := file.Seek(readOffset, io.SeekStart); err != nil {
 		return nil, offset
 	}
-	raw, err := io.ReadAll(file)
+	raw, err := io.ReadAll(io.LimitReader(file, vpnLogReadMaxBytes))
 	if err != nil {
 		return nil, offset
 	}
 	nextOffset := size
 	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	parts := strings.Split(text, "\n")
+	if skipped > 0 && len(parts) > 0 {
+		parts = parts[1:]
+	}
 	if len(parts) > 0 && parts[len(parts)-1] == "" {
 		parts = parts[:len(parts)-1]
 	}
 	lines := make([]string, 0, len(parts))
+	if skipped > 0 {
+		lines = append(lines, fmt.Sprintf("[log] skipped %d bytes before latest logs", skipped))
+	}
 	for _, line := range parts {
 		if line = strings.TrimRight(line, "\r"); line != "" {
-			lines = append(lines, line)
+			lines = append(lines, truncateVPNLogLine(line))
 		}
 	}
 	return lines, nextOffset
@@ -1989,19 +2007,58 @@ func readVPNLogTail(path string, maxLines int) []string {
 	if strings.TrimSpace(path) == "" || maxLines <= 0 {
 		return nil
 	}
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	size := stat.Size()
+	offset := int64(0)
+	if size > vpnLogReadMaxBytes {
+		offset = size - vpnLogReadMaxBytes
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, vpnLogReadMaxBytes))
 	if err != nil {
 		return nil
 	}
 	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	lines := strings.Split(text, "\n")
+	if offset > 0 && len(lines) > 0 {
+		lines = lines[1:]
+	}
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
 	if len(lines) > maxLines {
 		lines = lines[len(lines)-maxLines:]
 	}
+	for i := range lines {
+		lines[i] = truncateVPNLogLine(lines[i])
+	}
 	return lines
+}
+
+func truncateVPNLogLine(line string) string {
+	if len(line) <= vpnLogLineMaxBytes {
+		return line
+	}
+	const marker = "...[truncated]"
+	limit := vpnLogLineMaxBytes - len(marker)
+	if limit < 0 {
+		limit = 0
+	}
+	line = line[:limit]
+	for len(line) > 0 && !utf8.ValidString(line) {
+		line = line[:len(line)-1]
+	}
+	return line + marker
 }
 
 func vpnSessionStatePath(workDir string, sessionID string) string {

@@ -427,6 +427,60 @@ func TestAgentVPNStreamsIncrementalSidecarLogs(t *testing.T) {
 	}
 }
 
+func TestReadVPNLogLinesSinceCapsUnreadLogBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sing-box.log")
+	raw := strings.Repeat("old-log-byte", vpnLogReadMaxBytes) + "\nlatest log line\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines, nextOffset := readVPNLogLinesSince(path, 0)
+	if nextOffset != stat.Size() {
+		t.Fatalf("next offset = %d, want %d", nextOffset, stat.Size())
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "skipped") {
+		t.Fatalf("capped log read must report skipped bytes, got %#v", lines)
+	}
+	if !strings.Contains(joined, "latest log line") {
+		t.Fatalf("capped log read must keep latest lines, got %#v", lines)
+	}
+	if len(joined) > vpnLogReadMaxBytes {
+		t.Fatalf("capped log read returned too much data: %d bytes", len(joined))
+	}
+	for _, line := range lines {
+		if len(line) > vpnLogLineMaxBytes {
+			t.Fatalf("log line exceeded cap: %d bytes", len(line))
+		}
+	}
+}
+
+func TestReadVPNLogTailCapsLongLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sing-box.log")
+	longLine := strings.Repeat("x", vpnLogLineMaxBytes*2)
+	if err := os.WriteFile(path, []byte("short\n"+longLine+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := readVPNLogTail(path, 10)
+	if len(lines) != 2 {
+		t.Fatalf("unexpected log tail: %#v", lines)
+	}
+	if lines[0] != "short" {
+		t.Fatalf("short line changed: %#v", lines)
+	}
+	if len(lines[1]) > vpnLogLineMaxBytes {
+		t.Fatalf("long line exceeded cap: %d bytes", len(lines[1]))
+	}
+	if !strings.Contains(lines[1], "[truncated]") {
+		t.Fatalf("long line should be marked truncated, got %q", lines[1])
+	}
+}
+
 func TestHandleVPNControlRestartReplacesTrackedSession(t *testing.T) {
 	resetVPNManagerForTest(t)
 

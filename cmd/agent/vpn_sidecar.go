@@ -126,7 +126,7 @@ func defaultVPNSidecarRunner(ctx context.Context, spec vpnSidecarStartSpec) (vpn
 	}
 	cmd := processgroup.NewExecCommandContext(ctx, spec.CorePath, "run", "-c", spec.ConfigPath)
 	cmd.Dir = spec.WorkDir
-	logFile, err := os.OpenFile(spec.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	logFile, err := os.OpenFile(spec.LogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, err
 	}

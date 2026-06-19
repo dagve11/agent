@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -126,6 +127,60 @@ func TestAgentVPNStatusReturnsRunningSidecarLogTail(t *testing.T) {
 	logs := strings.Join(status.Logs, "\n")
 	if !strings.Contains(logs, "sidecar ready") || !strings.Contains(logs, "proxy accepted connection") {
 		t.Fatalf("running status must include sidecar log tail, got %#v", status.Logs)
+	}
+}
+
+func TestDefaultVPNSidecarRunnerTruncatesExistingLog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test is unix-only")
+	}
+	workDir := t.TempDir()
+	corePath := filepath.Join(workDir, "fake-sing-box")
+	if err := os.WriteFile(corePath, []byte("#!/bin/sh\necho fresh-log\nsleep 10\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(workDir, "config.json")
+	if err := os.WriteFile(configPath, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(workDir, "sing-box.log")
+	if err := os.WriteFile(logPath, []byte("old-log\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	process, err := defaultVPNSidecarRunner(ctx, vpnSidecarStartSpec{
+		SessionID:  "vpn-truncate-log",
+		Role:       model.VPNRoleEntry,
+		WorkDir:    workDir,
+		ConfigPath: configPath,
+		LogPath:    logPath,
+		CorePath:   corePath,
+	})
+	if err != nil {
+		cancel()
+		t.Fatalf("start sidecar runner: %v", err)
+	}
+	defer func() {
+		cancel()
+		_ = process.Stop()
+		_ = process.Wait()
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		raw, err := os.ReadFile(logPath)
+		if err == nil && strings.Contains(string(raw), "fresh-log") {
+			if strings.Contains(string(raw), "old-log") {
+				t.Fatalf("sidecar log must be truncated on start, got %q", string(raw))
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			raw, _ := os.ReadFile(logPath)
+			t.Fatalf("timed out waiting for fresh log, got %q", string(raw))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
