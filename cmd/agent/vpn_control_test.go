@@ -728,6 +728,63 @@ func TestAgentVPNStartReplacesExistingSessionSafely(t *testing.T) {
 	}
 }
 
+func TestAgentVPNSharedExitRuntimeFailureReleasesRuntime(t *testing.T) {
+	resetVPNManagerForTest(t)
+	process := newBlockingRecordingVPNSidecarProcess()
+	vpnManager.sidecarRunner = func(context.Context, vpnSidecarStartSpec) (vpnSidecarProcess, error) {
+		return process, nil
+	}
+	results := make(chan *pb.TaskResult, 1)
+	vpnManager.taskResultSender = func(result *pb.TaskResult) error {
+		results <- result
+		return nil
+	}
+
+	req := model.VPNControlRequest{
+		SessionID:     "vpn-session-shared-exit-fails",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleExit,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-exit-stream-shared-exit-fails",
+		Token:         "session-token",
+	}
+	result := runVPNControlTaskForTest(t, req)
+	if !result.Successful {
+		t.Fatalf("exit start should succeed before sidecar exits, got %q", result.Data)
+	}
+	if _, ok := vpnManager.Get(req.SessionID); !ok {
+		t.Fatal("exit start must keep the session tracked")
+	}
+	if len(vpnManager.sharedExitRuntimes) != 1 {
+		t.Fatalf("exit start must create one shared runtime, got %d", len(vpnManager.sharedExitRuntimes))
+	}
+
+	process.exit(errors.New("sing-box exited"))
+	var failed *pb.TaskResult
+	select {
+	case failed = <-results:
+	case <-time.After(time.Second):
+		t.Fatal("sidecar failure must report a VPN failed result")
+	}
+	var payload model.VPNControlResult
+	if err := json.Unmarshal([]byte(failed.Data), &payload); err != nil {
+		t.Fatalf("failed result payload must be valid JSON: %v", err)
+	}
+	if payload.State != model.VPNStateFailed || payload.LastError != "sing-box exited" {
+		t.Fatalf("unexpected failed payload: %#v", payload)
+	}
+	if !strings.Contains(strings.Join(payload.Logs, "\n"), "exit_core=shared failed: sing-box exited") {
+		t.Fatalf("failed payload must include shared exit cleanup logs, got %#v", payload.Logs)
+	}
+	if process.stopCalls != 1 {
+		t.Fatalf("shared exit runtime failure must stop the sidecar once, got %d", process.stopCalls)
+	}
+	if len(vpnManager.sharedExitRuntimes) != 0 {
+		t.Fatalf("shared exit runtime must be removed after failure, got %d", len(vpnManager.sharedExitRuntimes))
+	}
+}
+
 func TestAgentVPNStartRejectsReplacementWhenOldTunRestoreFails(t *testing.T) {
 	resetVPNManagerForTest(t)
 	tun := &recordingVPNTunManager{restoreErr: errors.New("restore failed")}

@@ -218,6 +218,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		} else {
 			_ = sidecar.Stop()
 		}
+		_ = relay.CloseSend()
 		go drainVPNRelayStream(relay)
 		sessionCancel()
 		err = fmt.Errorf("start VPN bridge for session %s role %s: %w", req.SessionID, req.Role, err)
@@ -850,10 +851,21 @@ func (m *AgentVPNManager) markSharedExitRuntimeFailed(key string, err error) {
 	for sessionID := range runtime.refs {
 		sessionIDs = append(sessionIDs, sessionID)
 	}
+	sidecar := runtime.sidecar
+	sidecarPID := runtime.sidecarPID
+	runtimeReq := runtime.Request
 	m.mu.Unlock()
 
+	cleanupLogs := []string{"[cleanup] exit_core=shared failed: " + err.Error()}
+	if sidecar != nil {
+		if stopErr := sidecar.Stop(); stopErr != nil && !isStaleSidecarAlreadyGone(stopErr) {
+			cleanupLogs = append(cleanupLogs, "[cleanup] sidecar_stop=failed: "+stopErr.Error())
+		}
+	}
+	cleanupLogs = append(cleanupLogs, m.cleanupSessionSidecarProcess(&AgentVPNSession{sidecarPID: sidecarPID}, sidecarPID)...)
+	cleanupLogs = append(cleanupLogs, m.cleanupVPNPortSidecars(runtimeReq)...)
 	for _, sessionID := range sessionIDs {
-		m.markSessionFailed(sessionID, err)
+		m.markSessionFailedWithReasonAndLogs(sessionID, err, model.VPNFailureReasonUnknown, cleanupLogs)
 	}
 }
 
@@ -1358,6 +1370,10 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 }
 
 func (m *AgentVPNManager) markSessionFailedWithReason(sessionID string, err error, reason string) {
+	m.markSessionFailedWithReasonAndLogs(sessionID, err, reason, nil)
+}
+
+func (m *AgentVPNManager) markSessionFailedWithReasonAndLogs(sessionID string, err error, reason string, initialCleanupLogs []string) {
 	if err == nil {
 		return
 	}
@@ -1382,7 +1398,7 @@ func (m *AgentVPNManager) markSessionFailedWithReason(sessionID string, err erro
 	bridge := session.bridge
 	send := m.taskResultSender
 	m.mu.Unlock()
-	cleanupLogs := make([]string, 0, 3)
+	cleanupLogs := append([]string(nil), initialCleanupLogs...)
 
 	if cancel != nil {
 		cancel()
@@ -1400,6 +1416,13 @@ func (m *AgentVPNManager) markSessionFailedWithReason(sessionID string, err erro
 	}
 	if bridge != nil {
 		_ = bridge.Close()
+	}
+	if session != nil && session.sharedExitRuntimeKey != "" {
+		cleanupLogs = append(cleanupLogs, m.releaseSharedExitRuntime(session)...)
+	} else if session != nil && session.sidecar != nil {
+		if err := session.sidecar.Stop(); err != nil && !isStaleSidecarAlreadyGone(err) {
+			cleanupLogs = append(cleanupLogs, "[cleanup] sidecar_stop=failed: "+err.Error())
+		}
 	}
 	tunRestoreErr := m.restoreSessionTun(session)
 	if tunRestoreErr != nil {
