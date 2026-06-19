@@ -19,32 +19,38 @@ const defaultVPNEgressProbeTimeout = 10 * time.Second
 const maxVPNEgressProbeBodyBytes = 512
 const vpnEgressProbeRetryInterval = 100 * time.Millisecond
 
-func defaultVPNEgressProbe(ctx context.Context, req model.VPNControlRequest) []string {
+func defaultVPNEgressProbe(ctx context.Context, req model.VPNControlRequest) ([]string, error) {
 	probeURL := strings.TrimSpace(req.Extra["egress_probe_url"])
 	if probeURL == "" {
-		return nil
+		return nil, nil
 	}
 	client, proxyLabel, err := vpnEgressProbeHTTPClient(req)
 	if err != nil {
-		return []string{fmt.Sprintf("[egress] probe skipped: %v", err)}
+		return []string{fmt.Sprintf("[egress] probe failed: %v", err)}, err
 	}
 	expectedIPs := parseVPNEgressExpectedIPs(req)
 
 	var lastErr error
+	var lastLogs []string
 	for {
 		logs, err := runVPNEgressProbeOnce(ctx, client, probeURL, proxyLabel, expectedIPs)
 		if err == nil {
-			return logs
+			return logs, nil
 		}
 		lastErr = err
+		lastLogs = logs
 		timer := time.NewTimer(vpnEgressProbeRetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			if lastErr != nil {
-				return []string{lastErr.Error()}
+				if len(lastLogs) > 0 {
+					return lastLogs, lastErr
+				}
+				return []string{lastErr.Error()}, lastErr
 			}
-			return []string{fmt.Sprintf("[egress] probe failed via %s: %v", proxyLabel, ctx.Err())}
+			err := fmt.Errorf("[egress] probe failed via %s: %v", proxyLabel, ctx.Err())
+			return []string{err.Error()}, err
 		case <-timer.C:
 		}
 	}
@@ -70,7 +76,14 @@ func runVPNEgressProbeOnce(ctx context.Context, client *http.Client, probeURL st
 	}
 	matchPart := ""
 	if len(expectedIPs) > 0 {
-		matchPart = fmt.Sprintf(" expected=%s match=%t", strings.Join(expectedIPs, ","), vpnEgressProbeMatchesExpected(observed, expectedIPs))
+		matched := vpnEgressProbeMatchesExpected(observed, expectedIPs)
+		expected := strings.Join(expectedIPs, ",")
+		matchPart = fmt.Sprintf(" expected=%s match=%t", expected, matched)
+		line := fmt.Sprintf("[egress] probe url=%s via=%s status=%s observed=%s%s", probeURL, proxyLabel, resp.Status, observed, matchPart)
+		if !matched {
+			return []string{line}, fmt.Errorf("[egress] observed exit %q does not match expected %s", observed, expected)
+		}
+		return []string{line}, nil
 	}
 	return []string{fmt.Sprintf("[egress] probe url=%s via=%s status=%s observed=%s%s", probeURL, proxyLabel, resp.Status, observed, matchPart)}, nil
 }

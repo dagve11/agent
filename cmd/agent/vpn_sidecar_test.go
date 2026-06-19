@@ -858,12 +858,12 @@ func TestAgentVPNSystemProxyApplyFailureReportsStartupCleanupLogs(t *testing.T) 
 func TestAgentVPNEgressProbeLogsObservedExitAfterStart(t *testing.T) {
 	resetVPNManagerForTest(t)
 	called := false
-	vpnManager.egressProbe = func(ctx context.Context, req model.VPNControlRequest) []string {
+	vpnManager.egressProbe = func(ctx context.Context, req model.VPNControlRequest) ([]string, error) {
 		called = true
 		if req.Extra["egress_probe_url"] != "https://ifconfig.example/ip" {
 			t.Fatalf("egress probe URL mismatch: %#v", req.Extra)
 		}
-		return []string{"[egress] observed_ip=198.51.100.20"}
+		return []string{"[egress] observed_ip=198.51.100.20"}, nil
 	}
 
 	req := model.VPNControlRequest{
@@ -889,6 +889,41 @@ func TestAgentVPNEgressProbeLogsObservedExitAfterStart(t *testing.T) {
 	}
 	if len(result.Logs) != 1 || !strings.Contains(result.Logs[0], "198.51.100.20") {
 		t.Fatalf("start result must include egress probe log, got %#v", result.Logs)
+	}
+}
+
+func TestAgentVPNEgressProbeFailureFailsStartWithExitReason(t *testing.T) {
+	resetVPNManagerForTest(t)
+	vpnManager.egressProbe = func(ctx context.Context, req model.VPNControlRequest) ([]string, error) {
+		return []string{"[egress] probe failed via http://127.0.0.1:8088"}, errors.New("exit probe mismatch")
+	}
+
+	req := model.VPNControlRequest{
+		SessionID:     "vpn-session-egress-probe-failed",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleEntry,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-entry-stream-egress-probe-failed",
+		Token:         "session-token",
+		ListenSOCKS:   "127.0.0.1:1080",
+		Extra: map[string]string{
+			"egress_probe_url": "https://ifconfig.example/ip",
+		},
+	}
+	req = withTestVPNBridgeAddress(t, req)
+	result, err := vpnManager.Start(req)
+	if err == nil {
+		t.Fatal("start must fail when egress probe fails")
+	}
+	if result.State != model.VPNStateFailed || result.FailureReason != model.VPNFailureReasonExitEgressFailed {
+		t.Fatalf("egress probe failure must report exit failure, got %#v", result)
+	}
+	if !strings.Contains(strings.Join(result.Logs, "\n"), "[egress] probe failed") {
+		t.Fatalf("egress probe failure logs must be preserved, got %#v", result.Logs)
+	}
+	if _, ok := vpnManager.Get(req.SessionID); ok {
+		t.Fatal("failed egress probe session must not be tracked as running")
 	}
 }
 
@@ -929,7 +964,7 @@ func TestDefaultVPNEgressProbeRetriesUntilLocalProxyReady(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	logs := defaultVPNEgressProbe(ctx, model.VPNControlRequest{
+	logs, err := defaultVPNEgressProbe(ctx, model.VPNControlRequest{
 		Role:       model.VPNRoleEntry,
 		Mode:       model.VPNModeSystemProxy,
 		ListenHTTP: proxyAddr,
@@ -938,6 +973,9 @@ func TestDefaultVPNEgressProbeRetriesUntilLocalProxyReady(t *testing.T) {
 			"egress_probe_timeout_seconds": "1",
 		},
 	})
+	if err != nil {
+		t.Fatalf("egress probe should eventually succeed: %v logs=%#v", err, logs)
+	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "198.51.100.77") {
 		t.Fatalf("egress probe should retry until local proxy is ready, got %#v", logs)
 	}
@@ -954,7 +992,7 @@ func TestDefaultVPNEgressProbeLogsExpectedIPMatch(t *testing.T) {
 	defer proxyServer.Close()
 	proxyAddr := strings.TrimPrefix(proxyServer.URL, "http://")
 
-	logs := defaultVPNEgressProbe(context.Background(), model.VPNControlRequest{
+	logs, err := defaultVPNEgressProbe(context.Background(), model.VPNControlRequest{
 		Role:       model.VPNRoleEntry,
 		Mode:       model.VPNModeSystemProxy,
 		ListenHTTP: proxyAddr,
@@ -963,8 +1001,42 @@ func TestDefaultVPNEgressProbeLogsExpectedIPMatch(t *testing.T) {
 			"egress_expected_ips": "198.51.100.20,2001:db8::20",
 		},
 	})
+	if err != nil {
+		t.Fatalf("egress probe should match expected IP: %v logs=%#v", err, logs)
+	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "expected=198.51.100.20,2001:db8::20") || !strings.Contains(logs[0], "match=true") {
 		t.Fatalf("egress probe log must include expected IPs and match result, got %#v", logs)
+	}
+}
+
+func TestDefaultVPNEgressProbeFailsExpectedIPMismatch(t *testing.T) {
+	probeURL := "http://ifconfig.example/ip"
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.String() != probeURL {
+			t.Errorf("probe request URL mismatch: %s", r.URL.String())
+		}
+		_, _ = w.Write([]byte("203.0.113.10\n"))
+	}))
+	defer proxyServer.Close()
+	proxyAddr := strings.TrimPrefix(proxyServer.URL, "http://")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	logs, err := defaultVPNEgressProbe(ctx, model.VPNControlRequest{
+		Role:       model.VPNRoleEntry,
+		Mode:       model.VPNModeSystemProxy,
+		ListenHTTP: proxyAddr,
+		Extra: map[string]string{
+			"egress_probe_url":             probeURL,
+			"egress_expected_ips":          "198.51.100.20",
+			"egress_probe_timeout_seconds": "1",
+		},
+	})
+	if err == nil {
+		t.Fatalf("egress probe should fail on expected IP mismatch, logs=%#v", logs)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "match=false") {
+		t.Fatalf("egress probe mismatch log must include match=false, got %#v", logs)
 	}
 }
 

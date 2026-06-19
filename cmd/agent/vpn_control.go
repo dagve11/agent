@@ -50,7 +50,7 @@ type AgentVPNManager struct {
 	systemProxyManager vpnSystemProxyManager
 	tunManager         vpnTunManager
 	tunHealthProbe     func(context.Context, model.VPNControlRequest) error
-	egressProbe        func(context.Context, model.VPNControlRequest) []string
+	egressProbe        func(context.Context, model.VPNControlRequest) ([]string, error)
 	sessionStateWriter func(string, agentVPNSessionState) error
 	staleSidecarKiller func(int) error
 	workDir            string
@@ -303,7 +303,39 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 		}
 		return vpnFailedResultWithLogs(req, err, cleanupLogs), err
 	}
-	logs := m.probeSessionEgress(req)
+	logs, err := m.probeSessionEgress(req)
+	if err != nil {
+		cleanupLogs := append([]string(nil), logs...)
+		systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
+		if systemProxyRestoreErr != nil {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
+		} else if shouldApplyVPNSystemProxy(req) {
+			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
+		}
+		_ = bridge.Close()
+		if session.sharedExitRuntimeKey != "" {
+			cleanupLogs = append(cleanupLogs, m.releaseSharedExitRuntime(session)...)
+		} else {
+			_ = sidecar.Stop()
+		}
+		_ = relay.CloseSend()
+		tunRestoreErr := m.restoreSessionTun(session)
+		if tunRestoreErr != nil {
+			cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=failed: "+tunRestoreErr.Error())
+		} else if isVPNTunMode(req.Mode) {
+			cleanupLogs = append(cleanupLogs, "[cleanup] tun_restore=ok")
+		}
+		if systemProxyRestoreErr != nil || tunRestoreErr != nil {
+			m.persistSessionRecoveryState(session)
+			if strings.TrimSpace(session.StatePath) != "" {
+				cleanupLogs = append(cleanupLogs, "[cleanup] state=kept-for-restore-retry path="+session.StatePath)
+			}
+		}
+		sessionCancel()
+		err = fmt.Errorf("VPN egress probe failed for session %s: %w", req.SessionID, err)
+		cleanupLogs = append(cleanupLogs, "[cleanup] rollback=bridge-closed,sidecar-stopped,relay-closed")
+		return vpnFailedResultWithReasonAndLogs(req, err, model.VPNFailureReasonExitEgressFailed, cleanupLogs), err
+	}
 
 	m.mu.Lock()
 	m.sessions[req.SessionID] = session
@@ -396,12 +428,13 @@ func (m *AgentVPNManager) Stop(req model.VPNControlRequest) (model.VPNControlRes
 		return vpnFailedResult(req, err), err
 	}
 	return model.VPNControlResult{
-		SessionID:     req.SessionID,
-		Action:        req.Action,
-		Role:          req.Role,
-		State:         model.VPNStateStopped,
-		Logs:          logs,
-		StoppedAtUnix: time.Now().Unix(),
+		SessionID:         req.SessionID,
+		RuntimeInstanceID: req.RuntimeInstanceID,
+		Action:            req.Action,
+		Role:              req.Role,
+		State:             model.VPNStateStopped,
+		Logs:              logs,
+		StoppedAtUnix:     time.Now().Unix(),
 	}, nil
 }
 
@@ -411,12 +444,13 @@ func (m *AgentVPNManager) Cleanup(req model.VPNControlRequest) (model.VPNControl
 		return vpnFailedResult(req, err), err
 	}
 	return model.VPNControlResult{
-		SessionID:     req.SessionID,
-		Action:        req.Action,
-		Role:          req.Role,
-		State:         model.VPNStateStopped,
-		Logs:          logs,
-		StoppedAtUnix: time.Now().Unix(),
+		SessionID:         req.SessionID,
+		RuntimeInstanceID: req.RuntimeInstanceID,
+		Action:            req.Action,
+		Role:              req.Role,
+		State:             model.VPNStateStopped,
+		Logs:              logs,
+		StoppedAtUnix:     time.Now().Unix(),
 	}, nil
 }
 
@@ -1690,9 +1724,9 @@ func (m *AgentVPNManager) probeSessionTunHealth(req model.VPNControlRequest) err
 	return m.tunHealthProbe(ctx, req)
 }
 
-func (m *AgentVPNManager) probeSessionEgress(req model.VPNControlRequest) []string {
+func (m *AgentVPNManager) probeSessionEgress(req model.VPNControlRequest) ([]string, error) {
 	if req.Role != model.VPNRoleEntry || strings.TrimSpace(req.Extra["egress_probe_url"]) == "" || m.egressProbe == nil {
-		return nil
+		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), vpnEgressProbeTimeout(req))
 	defer cancel()
@@ -2286,5 +2320,11 @@ func vpnFailedResultWithLogs(req model.VPNControlRequest, err error, logs []stri
 	if len(logs) > 0 {
 		result.Logs = append(result.Logs, logs...)
 	}
+	return result
+}
+
+func vpnFailedResultWithReasonAndLogs(req model.VPNControlRequest, err error, reason string, logs []string) model.VPNControlResult {
+	result := vpnFailedResultWithLogs(req, err, logs)
+	result.FailureReason = reason
 	return result
 }

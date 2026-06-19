@@ -257,14 +257,15 @@ func TestHandleVPNControlStopClosesTrackedSession(t *testing.T) {
 	resetVPNManagerForTest(t)
 
 	start := model.VPNControlRequest{
-		SessionID:     "vpn-session-1",
-		Action:        model.VPNActionStart,
-		Role:          model.VPNRoleEntry,
-		Mode:          model.VPNModeSystemProxy,
-		RelayMode:     model.VPNRelayModeDashboard,
-		RelayStreamID: "vpn-entry-stream-1",
-		Token:         "session-token",
-		ListenSOCKS:   "127.0.0.1:1080",
+		SessionID:         "vpn-session-1",
+		RuntimeInstanceID: "vpn-runtime-1",
+		Action:            model.VPNActionStart,
+		Role:              model.VPNRoleEntry,
+		Mode:              model.VPNModeSystemProxy,
+		RelayMode:         model.VPNRelayModeDashboard,
+		RelayStreamID:     "vpn-entry-stream-1",
+		Token:             "session-token",
+		ListenSOCKS:       "127.0.0.1:1080",
 	}
 	startResult := runVPNControlTaskForTest(t, start)
 	if !startResult.Successful {
@@ -282,7 +283,7 @@ func TestHandleVPNControlStopClosesTrackedSession(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.Data), &payload); err != nil {
 		t.Fatalf("decode VPN stop result: %v", err)
 	}
-	if payload.State != model.VPNStateStopped || payload.StoppedAtUnix == 0 {
+	if payload.State != model.VPNStateStopped || payload.StoppedAtUnix == 0 || payload.RuntimeInstanceID != start.RuntimeInstanceID {
 		t.Fatalf("unexpected stop result: %#v", payload)
 	}
 	if _, ok := vpnManager.Get(start.SessionID); ok {
