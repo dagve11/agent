@@ -118,7 +118,7 @@ func TestAgentVPNDirectBridgeFailureMarksSessionFailed(t *testing.T) {
 	vpnManager.sessions[session.Request.SessionID] = session
 	vpnManager.mu.Unlock()
 
-	vpnManager.watchBridge(session.Request.SessionID, bridge)
+	vpnManager.watchBridge(session.Request.SessionID, session, bridge)
 	bridge.finish(vpnBridgeFailureError{reason: model.VPNFailureReasonRelayFailed, err: io.ErrUnexpectedEOF})
 
 	select {
@@ -725,6 +725,62 @@ func TestAgentVPNStartReplacesExistingSessionSafely(t *testing.T) {
 	}
 	if session.State != model.VPNStateRunning || session.sidecar == nil {
 		t.Fatalf("unexpected replacement session: %#v", session)
+	}
+}
+
+func TestAgentVPNOldSidecarFailureDoesNotFailReplacementSession(t *testing.T) {
+	resetVPNManagerForTest(t)
+	processes := make([]*manualFailVPNSidecarProcess, 0, 2)
+	vpnManager.sidecarRunner = func(context.Context, vpnSidecarStartSpec) (vpnSidecarProcess, error) {
+		process := newManualFailVPNSidecarProcess()
+		processes = append(processes, process)
+		return process, nil
+	}
+	results := make(chan *pb.TaskResult, 1)
+	vpnManager.taskResultSender = func(result *pb.TaskResult) error {
+		results <- result
+		return nil
+	}
+
+	req := model.VPNControlRequest{
+		SessionID:     "vpn-session-stale-sidecar",
+		Action:        model.VPNActionStart,
+		Role:          model.VPNRoleEntry,
+		Mode:          model.VPNModeSystemProxy,
+		RelayMode:     model.VPNRelayModeDashboard,
+		RelayStreamID: "vpn-entry-stream-stale-sidecar",
+		Token:         "session-token",
+		ListenSOCKS:   "127.0.0.1:1080",
+	}
+	if result := runVPNControlTaskForTest(t, req); !result.Successful {
+		t.Fatalf("start should succeed before replacement, got %q", result.Data)
+	}
+	if len(processes) != 1 {
+		t.Fatalf("first start must create one sidecar, got %d", len(processes))
+	}
+	processes[0].waitForWaitStarted(t)
+
+	req.RelayStreamID = "vpn-entry-stream-stale-sidecar-replacement"
+	if result := runVPNControlTaskForTest(t, req); !result.Successful {
+		t.Fatalf("replacement start should succeed, got %q", result.Data)
+	}
+	if len(processes) != 2 {
+		t.Fatalf("replacement start must create a second sidecar, got %d", len(processes))
+	}
+	processes[1].waitForWaitStarted(t)
+
+	processes[0].exit(errors.New("old sidecar exited after replacement"))
+	select {
+	case result := <-results:
+		t.Fatalf("old sidecar failure must not emit a failed result for replacement session: %s", result.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
+	session, ok := vpnManager.Get(req.SessionID)
+	if !ok {
+		t.Fatal("replacement session must remain tracked")
+	}
+	if session.State != model.VPNStateRunning || session.sidecar == nil || session.sidecar.process != processes[1] {
+		t.Fatalf("old sidecar failure must not affect replacement session: %#v", session)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2268,6 +2269,45 @@ func acceptEventuallyForTest(ln net.Listener) (net.Conn, error) {
 
 func newBlockingRecordingVPNSidecarProcess() *recordingVPNSidecarProcess {
 	return &recordingVPNSidecarProcess{waitCh: make(chan error, 1)}
+}
+
+type manualFailVPNSidecarProcess struct {
+	waitCh      chan error
+	waitStarted chan struct{}
+	waitOnce    sync.Once
+	stopCalls   int
+	waitCalls   int
+}
+
+func newManualFailVPNSidecarProcess() *manualFailVPNSidecarProcess {
+	return &manualFailVPNSidecarProcess{
+		waitCh:      make(chan error, 1),
+		waitStarted: make(chan struct{}),
+	}
+}
+
+func (p *manualFailVPNSidecarProcess) Stop() error {
+	p.stopCalls++
+	return nil
+}
+
+func (p *manualFailVPNSidecarProcess) Wait() error {
+	p.waitCalls++
+	p.waitOnce.Do(func() { close(p.waitStarted) })
+	return <-p.waitCh
+}
+
+func (p *manualFailVPNSidecarProcess) exit(err error) {
+	p.waitCh <- err
+}
+
+func (p *manualFailVPNSidecarProcess) waitForWaitStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-p.waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sidecar wait watcher did not start")
+	}
 }
 
 func (p *recordingVPNSidecarProcess) Stop() error {

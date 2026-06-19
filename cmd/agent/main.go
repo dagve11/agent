@@ -524,6 +524,45 @@ func newSerialTaskResultSender(send func(*pb.TaskResult) error) func(*pb.TaskRes
 	}
 }
 
+type queuedAgentTask struct {
+	task   *pb.Task
+	send   func(*pb.TaskResult) error
+	cancel context.CancelFunc
+}
+
+type serialAgentTaskDispatcher struct {
+	once sync.Once
+	ch   chan queuedAgentTask
+	run  func(*pb.Task, func(*pb.TaskResult) error, context.CancelFunc)
+}
+
+func newSerialAgentTaskDispatcher(run func(*pb.Task, func(*pb.TaskResult) error, context.CancelFunc)) *serialAgentTaskDispatcher {
+	if run == nil {
+		run = runAgentTask
+	}
+	return &serialAgentTaskDispatcher{
+		ch:  make(chan queuedAgentTask, 64),
+		run: run,
+	}
+}
+
+func (d *serialAgentTaskDispatcher) Dispatch(task *pb.Task, send func(*pb.TaskResult) error, cancel context.CancelFunc) {
+	if d == nil {
+		go runAgentTask(task, send, cancel)
+		return
+	}
+	d.once.Do(func() {
+		go func() {
+			for queued := range d.ch {
+				d.run(queued.task, queued.send, queued.cancel)
+			}
+		}()
+	})
+	d.ch <- queuedAgentTask{task: task, send: send, cancel: cancel}
+}
+
+var vpnControlTaskDispatcher = newSerialAgentTaskDispatcher(nil)
+
 func receiveTasksDaemon(tasks pb.NezhaService_RequestTaskClient, cancel context.CancelFunc) {
 	var task *pb.Task
 	var err error
@@ -550,12 +589,18 @@ func receiveTasksDaemon(tasks pb.NezhaService_RequestTaskClient, cancel context.
 //     两个 goroutine 抢 reloadMu 的顺序与到达顺序无关，反向调度时 agent 会
 //     把已取消的 credential 写盘锁死自己。两个 handler 都很短（JSON 解析 +
 //     ValidateConfig + 装计时器），不会拖慢其它任务接收。
+//   - TaskTypeVPNControl 使用独立串行队列。dashboard 会按 stop -> start 的
+//     顺序下发 fallback/restart 控制，agent 端不能并发执行这些任务，否则旧
+//     sidecar 还没释放 19090/19091 时新 runtime 就会启动失败。
 //   - 其它 task（HTTPGet/Ping/Command/Terminal/NAT/FM/...）继续 goroutine 派
 //     发：它们可能跑很久或永远不返回（流式 terminal/fm），不能阻塞接收循环。
 func dispatchAgentTask(task *pb.Task, send func(*pb.TaskResult) error, cancel context.CancelFunc) {
 	switch task.GetType() {
 	case model.TaskTypeApplyConfig, model.TaskTypeServerTransferApply:
 		runAgentTask(task, send, cancel)
+		return
+	case model.TaskTypeVPNControl:
+		vpnControlTaskDispatcher.Dispatch(task, send, cancel)
 		return
 	}
 	go runAgentTask(task, send, cancel)

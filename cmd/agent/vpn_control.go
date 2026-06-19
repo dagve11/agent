@@ -70,6 +70,11 @@ type agentVPNSharedExitRuntime struct {
 	refs           map[string]struct{}
 }
 
+type agentVPNSharedExitFailedSession struct {
+	sessionID string
+	session   *AgentVPNSession
+}
+
 var vpnRuleSetStatusFiles = []string{"manifest.json", "geosite-cn.srs", "geoip-cn.srs"}
 
 const (
@@ -342,10 +347,10 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	m.sessions[req.SessionID] = session
 	m.mu.Unlock()
 	if session.sharedExitRuntimeKey == "" {
-		m.watchSidecar(req.SessionID, sidecar)
+		m.watchSidecar(req.SessionID, session, sidecar)
 	}
 	if req.RelayMode == model.VPNRelayModeDirect {
-		m.watchBridge(req.SessionID, bridge)
+		m.watchBridge(req.SessionID, session, bridge)
 	}
 	m.watchSidecarLogs(sessionCtx, req.SessionID, session.LogPath)
 	if req.RelayMode == model.VPNRelayModeDirect && req.Role == model.VPNRoleEntry {
@@ -847,9 +852,16 @@ func (m *AgentVPNManager) markSharedExitRuntimeFailed(key string, err error) {
 		return
 	}
 	delete(m.sharedExitRuntimes, key)
-	sessionIDs := make([]string, 0, len(runtime.refs))
+	sessions := make([]agentVPNSharedExitFailedSession, 0, len(runtime.refs))
 	for sessionID := range runtime.refs {
-		sessionIDs = append(sessionIDs, sessionID)
+		session := m.sessions[sessionID]
+		if session == nil || session.sharedExitRuntimeKey != key {
+			continue
+		}
+		sessions = append(sessions, agentVPNSharedExitFailedSession{
+			sessionID: sessionID,
+			session:   session,
+		})
 	}
 	sidecar := runtime.sidecar
 	sidecarPID := runtime.sidecarPID
@@ -864,8 +876,8 @@ func (m *AgentVPNManager) markSharedExitRuntimeFailed(key string, err error) {
 	}
 	cleanupLogs = append(cleanupLogs, m.cleanupSessionSidecarProcess(&AgentVPNSession{sidecarPID: sidecarPID}, sidecarPID)...)
 	cleanupLogs = append(cleanupLogs, m.cleanupVPNPortSidecars(runtimeReq)...)
-	for _, sessionID := range sessionIDs {
-		m.markSessionFailedWithReasonAndLogs(sessionID, err, model.VPNFailureReasonUnknown, cleanupLogs)
+	for _, failed := range sessions {
+		m.markSessionFailedWithReasonAndLogsIfCurrent(failed.sessionID, failed.session, err, model.VPNFailureReasonUnknown, cleanupLogs)
 	}
 }
 
@@ -1312,7 +1324,7 @@ func vpnTrackedSessionSidecarPID(session *AgentVPNSession) int {
 	return session.sidecarPID
 }
 
-func (m *AgentVPNManager) watchSidecar(sessionID string, sidecar *AgentVPNSidecar) {
+func (m *AgentVPNManager) watchSidecar(sessionID string, session *AgentVPNSession, sidecar *AgentVPNSidecar) {
 	if sidecar == nil {
 		return
 	}
@@ -1321,11 +1333,11 @@ func (m *AgentVPNManager) watchSidecar(sessionID string, sidecar *AgentVPNSideca
 		if err == nil {
 			return
 		}
-		m.markSessionFailed(sessionID, err)
+		m.markSessionFailedIfCurrent(sessionID, session, err)
 	}()
 }
 
-func (m *AgentVPNManager) watchBridge(sessionID string, bridge *AgentVPNBridge) {
+func (m *AgentVPNManager) watchBridge(sessionID string, session *AgentVPNSession, bridge *AgentVPNBridge) {
 	if bridge == nil || bridge.Done() == nil {
 		return
 	}
@@ -1334,11 +1346,11 @@ func (m *AgentVPNManager) watchBridge(sessionID string, bridge *AgentVPNBridge) 
 		if !ok || err == nil {
 			return
 		}
-		m.markBridgeFailed(sessionID, fmt.Errorf("VPN bridge relay closed: %w", err), vpnBridgeFailureReason(err))
+		m.markBridgeFailed(sessionID, session, fmt.Errorf("VPN bridge relay closed: %w", err), vpnBridgeFailureReason(err))
 	}()
 }
 
-func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error, reason string) {
+func (m *AgentVPNManager) markBridgeFailed(sessionID string, expected *AgentVPNSession, err error, reason string) {
 	if err == nil {
 		return
 	}
@@ -1348,12 +1360,16 @@ func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error, reason s
 		m.mu.Unlock()
 		return
 	}
+	if expected != nil && session != expected {
+		m.mu.Unlock()
+		return
+	}
 	sidecar := session.sidecar
 	sidecarPID := vpnTrackedSessionSidecarPID(session)
 	sharedExitRuntime := session.sharedExitRuntimeKey != ""
 	m.mu.Unlock()
 
-	m.markSessionFailedWithReason(sessionID, err, reason)
+	m.markSessionFailedWithReasonIfCurrent(sessionID, expected, err, reason)
 
 	if sharedExitRuntime {
 		_ = m.releaseSharedExitRuntime(session)
@@ -1369,11 +1385,23 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 	m.markSessionFailedWithReason(sessionID, err, model.VPNFailureReasonUnknown)
 }
 
+func (m *AgentVPNManager) markSessionFailedIfCurrent(sessionID string, expected *AgentVPNSession, err error) {
+	m.markSessionFailedWithReasonIfCurrent(sessionID, expected, err, model.VPNFailureReasonUnknown)
+}
+
 func (m *AgentVPNManager) markSessionFailedWithReason(sessionID string, err error, reason string) {
 	m.markSessionFailedWithReasonAndLogs(sessionID, err, reason, nil)
 }
 
+func (m *AgentVPNManager) markSessionFailedWithReasonIfCurrent(sessionID string, expected *AgentVPNSession, err error, reason string) {
+	m.markSessionFailedWithReasonAndLogsIfCurrent(sessionID, expected, err, reason, nil)
+}
+
 func (m *AgentVPNManager) markSessionFailedWithReasonAndLogs(sessionID string, err error, reason string, initialCleanupLogs []string) {
+	m.markSessionFailedWithReasonAndLogsIfCurrent(sessionID, nil, err, reason, initialCleanupLogs)
+}
+
+func (m *AgentVPNManager) markSessionFailedWithReasonAndLogsIfCurrent(sessionID string, expected *AgentVPNSession, err error, reason string, initialCleanupLogs []string) {
 	if err == nil {
 		return
 	}
@@ -1383,6 +1411,10 @@ func (m *AgentVPNManager) markSessionFailedWithReasonAndLogs(sessionID string, e
 	m.mu.Lock()
 	session := m.sessions[sessionID]
 	if session == nil {
+		m.mu.Unlock()
+		return
+	}
+	if expected != nil && session != expected {
 		m.mu.Unlock()
 		return
 	}
