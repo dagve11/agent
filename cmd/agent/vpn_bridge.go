@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -19,6 +20,11 @@ const vpnMuxFrameHeaderSize = 17
 const vpnMuxFrameTypeOpen byte = 1
 const vpnMuxFrameTypeData byte = 2
 const vpnMuxFrameTypeClose byte = 3
+const vpnMuxFrameTypePing byte = 4
+const vpnMuxFrameTypePong byte = 5
+
+const vpnMuxHeartbeatInterval = 10 * time.Second
+const vpnMuxHeartbeatTimeout = 35 * time.Second
 
 var vpnMuxFrameMagic = [4]byte{'N', 'Z', 'V', 'M'}
 
@@ -28,6 +34,33 @@ type AgentVPNBridge struct {
 	stats    *vpnBridgeStats
 	done     chan error
 	doneOnce sync.Once
+}
+
+type vpnBridgeFailureError struct {
+	reason string
+	err    error
+}
+
+func (e vpnBridgeFailureError) Error() string {
+	if e.err == nil {
+		return e.reason
+	}
+	if e.reason == "" {
+		return e.err.Error()
+	}
+	return e.reason + ": " + e.err.Error()
+}
+
+func (e vpnBridgeFailureError) Unwrap() error {
+	return e.err
+}
+
+func vpnBridgeFailureReason(err error) string {
+	var bridgeErr vpnBridgeFailureError
+	if errors.As(err, &bridgeErr) && bridgeErr.reason != "" {
+		return bridgeErr.reason
+	}
+	return model.VPNFailureReasonUnknown
 }
 
 type vpnBridgeStats struct {
@@ -67,6 +100,7 @@ func startAgentVPNEntryBridge(ctx context.Context, req model.VPNControlRequest, 
 		done:   make(chan error, 1),
 	}
 	mux := newVPNMuxBridge(ctx, newVPNRelayByteStream(stream), nil, stats)
+	mux.setHeartbeatEnabled(req.RelayMode == model.VPNRelayModeDirect)
 	mux.onError = func(err error) {
 		bridge.finish(err)
 		_ = bridge.Close()
@@ -142,6 +176,7 @@ func startAgentVPNExitBridge(ctx context.Context, req model.VPNControlRequest, s
 	mux := newVPNMuxBridge(ctx, newVPNRelayByteStream(stream), func(ctx context.Context) (net.Conn, error) {
 		return dialVPNBridgeTarget(ctx, addr)
 	}, nil)
+	mux.setHeartbeatEnabled(req.RelayMode == model.VPNRelayModeDirect)
 	bridge := &AgentVPNBridge{
 		cancel: cancel,
 		close:  mux.Close,
@@ -339,29 +374,42 @@ type vpnMuxFrame struct {
 }
 
 type vpnMuxBridge struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	rw          io.ReadWriteCloser
-	stats       *vpnBridgeStats
-	sendMu      sync.Mutex
-	failOnce    sync.Once
-	mu          sync.Mutex
-	conns       map[uint64]net.Conn
-	nextID      atomic.Uint64
-	idleTimeout time.Duration
-	dialTarget  func(context.Context) (net.Conn, error)
-	onError     func(error)
+	ctx               context.Context
+	cancel            context.CancelFunc
+	rw                io.ReadWriteCloser
+	stats             *vpnBridgeStats
+	sendMu            sync.Mutex
+	failOnce          sync.Once
+	mu                sync.Mutex
+	conns             map[uint64]net.Conn
+	nextID            atomic.Uint64
+	idleTimeout       time.Duration
+	dialTarget        func(context.Context) (net.Conn, error)
+	onError           func(error)
+	heartbeatEnabled  bool
+	heartbeatInterval time.Duration
+	heartbeatTimeout  time.Duration
+	lastFrameUnixNano atomic.Int64
 }
 
 func newVPNMuxBridge(ctx context.Context, rw io.ReadWriteCloser, dialTarget func(context.Context) (net.Conn, error), stats *vpnBridgeStats) *vpnMuxBridge {
 	ctx, cancel := context.WithCancel(ctx)
 	return &vpnMuxBridge{
-		ctx:        ctx,
-		cancel:     cancel,
-		rw:         rw,
-		stats:      stats,
-		conns:      make(map[uint64]net.Conn),
-		dialTarget: dialTarget,
+		ctx:               ctx,
+		cancel:            cancel,
+		rw:                rw,
+		stats:             stats,
+		conns:             make(map[uint64]net.Conn),
+		dialTarget:        dialTarget,
+		heartbeatInterval: vpnMuxHeartbeatInterval,
+		heartbeatTimeout:  vpnMuxHeartbeatTimeout,
+	}
+}
+
+func (m *vpnMuxBridge) setHeartbeatEnabled(enabled bool) {
+	m.heartbeatEnabled = enabled
+	if enabled {
+		m.lastFrameUnixNano.Store(time.Now().UnixNano())
 	}
 }
 
@@ -445,6 +493,9 @@ func (m *vpnMuxBridge) fail(err error) {
 
 func (m *vpnMuxBridge) runReadLoop() error {
 	defer m.Close()
+	if m.heartbeatEnabled {
+		go m.runHeartbeatLoop()
+	}
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -456,10 +507,43 @@ func (m *vpnMuxBridge) runReadLoop() error {
 			if m.ctx.Err() != nil {
 				return nil
 			}
-			m.fail(err)
-			return err
+			failErr := vpnBridgeFailureError{reason: model.VPNFailureReasonRelayFailed, err: err}
+			m.fail(failErr)
+			return failErr
+		}
+		if m.heartbeatEnabled {
+			m.lastFrameUnixNano.Store(time.Now().UnixNano())
 		}
 		m.handleFrame(frame)
+	}
+}
+
+func (m *vpnMuxBridge) runHeartbeatLoop() {
+	interval := m.heartbeatInterval
+	if interval <= 0 {
+		interval = vpnMuxHeartbeatInterval
+	}
+	timeout := m.heartbeatTimeout
+	if timeout <= 0 {
+		timeout = vpnMuxHeartbeatTimeout
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			last := time.Unix(0, m.lastFrameUnixNano.Load())
+			if !last.IsZero() && time.Since(last) > timeout {
+				m.fail(vpnBridgeFailureError{
+					reason: model.VPNFailureReasonHeartbeatTimeout,
+					err:    fmt.Errorf("VPN mux heartbeat timeout after %s", timeout),
+				})
+				return
+			}
+			_ = m.sendFrame(vpnMuxFrameTypePing, 0, nil)
+		}
 	}
 }
 
@@ -497,6 +581,10 @@ func (m *vpnMuxBridge) handleFrame(frame vpnMuxFrame) {
 		}
 	case vpnMuxFrameTypeClose:
 		m.closeConn(frame.ConnID)
+	case vpnMuxFrameTypePing:
+		_ = m.sendFrame(vpnMuxFrameTypePong, 0, nil)
+	case vpnMuxFrameTypePong:
+		return
 	}
 }
 
@@ -543,7 +631,7 @@ func (m *vpnMuxBridge) sendFrame(frameType byte, connID uint64, payload []byte) 
 	defer m.sendMu.Unlock()
 	err := writeVPNMuxFrame(m.rw, vpnMuxFrame{Type: frameType, ConnID: connID, Payload: payload})
 	if err != nil && m.ctx.Err() == nil {
-		m.fail(err)
+		m.fail(vpnBridgeFailureError{reason: model.VPNFailureReasonRelayFailed, err: err})
 	}
 	return err
 }

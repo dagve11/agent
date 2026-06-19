@@ -119,7 +119,7 @@ func TestAgentVPNDirectBridgeFailureMarksSessionFailed(t *testing.T) {
 	vpnManager.mu.Unlock()
 
 	vpnManager.watchBridge(session.Request.SessionID, bridge)
-	bridge.finish(io.ErrUnexpectedEOF)
+	bridge.finish(vpnBridgeFailureError{reason: model.VPNFailureReasonRelayFailed, err: io.ErrUnexpectedEOF})
 
 	select {
 	case result := <-results:
@@ -130,7 +130,7 @@ func TestAgentVPNDirectBridgeFailureMarksSessionFailed(t *testing.T) {
 		if err := json.Unmarshal([]byte(result.GetData()), &payload); err != nil {
 			t.Fatalf("decode failed direct bridge payload: %v", err)
 		}
-		if payload.State != model.VPNStateFailed || !strings.Contains(payload.LastError, "VPN bridge relay closed") {
+		if payload.State != model.VPNStateFailed || payload.FailureReason != model.VPNFailureReasonRelayFailed || !strings.Contains(payload.LastError, "VPN bridge relay closed") {
 			t.Fatalf("unexpected direct bridge failure payload: %#v", payload)
 		}
 	case <-time.After(time.Second):

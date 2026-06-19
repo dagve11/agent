@@ -160,7 +160,10 @@ func TestVPNEntryBridgeReportsRelayReadFailure(t *testing.T) {
 	defer bridge.Close()
 
 	stream.finish(io.ErrUnexpectedEOF)
-	waitVPNBridgeFailure(t, bridge.Done(), io.ErrUnexpectedEOF)
+	err = waitVPNBridgeFailure(t, bridge.Done(), io.ErrUnexpectedEOF)
+	if reason := vpnBridgeFailureReason(err); reason != model.VPNFailureReasonRelayFailed {
+		t.Fatalf("relay read failure reason = %q, want relay_failed", reason)
+	}
 }
 
 func TestVPNEntryBridgeReportsRelayWriteFailure(t *testing.T) {
@@ -184,7 +187,83 @@ func TestVPNEntryBridgeReportsRelayWriteFailure(t *testing.T) {
 		t.Fatalf("dial bridge: %v", err)
 	}
 	defer conn.Close()
-	waitVPNBridgeFailure(t, bridge.Done(), io.ErrClosedPipe)
+	err = waitVPNBridgeFailure(t, bridge.Done(), io.ErrClosedPipe)
+	if reason := vpnBridgeFailureReason(err); reason != model.VPNFailureReasonRelayFailed {
+		t.Fatalf("relay write failure reason = %q, want relay_failed", reason)
+	}
+}
+
+func TestVPNMuxBridgeHeartbeatTimeoutFailsDirectRelay(t *testing.T) {
+	local, remote := net.Pipe()
+	defer remote.Close()
+	mux := newVPNMuxBridge(context.Background(), local, nil, nil)
+	mux.heartbeatInterval = 10 * time.Millisecond
+	mux.heartbeatTimeout = 25 * time.Millisecond
+	mux.setHeartbeatEnabled(true)
+	failures := make(chan error, 1)
+	mux.onError = func(err error) {
+		failures <- err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mux.runReadLoop()
+	}()
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			if _, err := readVPNMuxFrame(remote); err != nil {
+				return
+			}
+		}
+	}()
+
+	var err error
+	select {
+	case err = <-failures:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for heartbeat failure")
+	}
+	if reason := vpnBridgeFailureReason(err); reason != model.VPNFailureReasonHeartbeatTimeout {
+		t.Fatalf("heartbeat timeout reason = %q, want heartbeat_timeout err=%v", reason, err)
+	}
+	_ = mux.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat read loop did not exit")
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat drain goroutine did not exit")
+	}
+}
+
+func TestVPNMuxBridgeRespondsToHeartbeatPing(t *testing.T) {
+	local, remote := net.Pipe()
+	defer remote.Close()
+	mux := newVPNMuxBridge(context.Background(), local, nil, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- mux.runReadLoop()
+	}()
+	defer func() {
+		_ = mux.Close()
+		waitVPNBridgeDone(t, done)
+	}()
+
+	if err := writeVPNMuxFrame(remote, vpnMuxFrame{Type: vpnMuxFrameTypePing}); err != nil {
+		t.Fatalf("write ping: %v", err)
+	}
+	frame, err := readVPNMuxFrame(remote)
+	if err != nil {
+		t.Fatalf("read pong: %v", err)
+	}
+	if frame.Type != vpnMuxFrameTypePong {
+		t.Fatalf("ping response type = %d, want pong", frame.Type)
+	}
 }
 
 func TestVPNBridgeMultiplexesConcurrentEntryConnectionsThroughOneRelay(t *testing.T) {
@@ -395,17 +474,19 @@ func assertVPNStreamMuxPayloadNotSent(t *testing.T, stream *scriptedVPNIOStream,
 	}
 }
 
-func waitVPNBridgeFailure(t *testing.T, done <-chan error, want error) {
+func waitVPNBridgeFailure(t *testing.T, done <-chan error, want error) error {
 	t.Helper()
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, want) {
+		if want != nil && !errors.Is(err, want) {
 			t.Fatalf("bridge failure mismatch: want %v got %v", want, err)
 		}
+		return err
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for bridge failure")
 	}
+	return nil
 }
 
 type pairedVPNIOStream struct {

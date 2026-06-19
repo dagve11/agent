@@ -127,6 +127,7 @@ func (m *AgentVPNManager) Control(req model.VPNControlRequest) (model.VPNControl
 
 	return model.VPNControlResult{
 		SessionID:          req.SessionID,
+		RuntimeInstanceID:  session.Request.RuntimeInstanceID,
 		Action:             req.Action,
 		Role:               req.Role,
 		State:              model.VPNStateRunning,

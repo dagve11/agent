@@ -31,6 +31,7 @@ type AgentVPNSession struct {
 	CoreCleanupDir       string
 	StatePath            string
 	LastError            string
+	failureReason        string
 	sidecarPID           int
 	tunSnapshotPath      string
 	systemProxyApplied   bool
@@ -320,6 +321,7 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 
 	return model.VPNControlResult{
 		SessionID:          req.SessionID,
+		RuntimeInstanceID:  req.RuntimeInstanceID,
 		Action:             req.Action,
 		Role:               req.Role,
 		State:              model.VPNStateRunning,
@@ -842,6 +844,7 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 	}
 	payload := model.VPNControlResult{
 		SessionID:          req.SessionID,
+		RuntimeInstanceID:  session.Request.RuntimeInstanceID,
 		Action:             req.Action,
 		Role:               req.Role,
 		State:              session.State,
@@ -849,6 +852,7 @@ func (m *AgentVPNManager) Status(req model.VPNControlRequest) (model.VPNControlR
 		LocalSOCKS:         session.Request.ListenSOCKS,
 		TunName:            session.Request.TunName,
 		SystemProxyApplied: trackedVPNSystemProxyApplied(session.Request, session),
+		FailureReason:      session.failureReason,
 		LastError:          session.LastError,
 		StartedAtUnix:      session.StartedAt.Unix(),
 	}
@@ -1284,11 +1288,11 @@ func (m *AgentVPNManager) watchBridge(sessionID string, bridge *AgentVPNBridge) 
 		if !ok || err == nil {
 			return
 		}
-		m.markBridgeFailed(sessionID, fmt.Errorf("VPN bridge relay closed: %w", err))
+		m.markBridgeFailed(sessionID, fmt.Errorf("VPN bridge relay closed: %w", err), vpnBridgeFailureReason(err))
 	}()
 }
 
-func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error) {
+func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error, reason string) {
 	if err == nil {
 		return
 	}
@@ -1303,7 +1307,7 @@ func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error) {
 	sharedExitRuntime := session.sharedExitRuntimeKey != ""
 	m.mu.Unlock()
 
-	m.markSessionFailed(sessionID, err)
+	m.markSessionFailedWithReason(sessionID, err, reason)
 
 	if sharedExitRuntime {
 		_ = m.releaseSharedExitRuntime(session)
@@ -1316,8 +1320,15 @@ func (m *AgentVPNManager) markBridgeFailed(sessionID string, err error) {
 }
 
 func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
+	m.markSessionFailedWithReason(sessionID, err, model.VPNFailureReasonUnknown)
+}
+
+func (m *AgentVPNManager) markSessionFailedWithReason(sessionID string, err error, reason string) {
 	if err == nil {
 		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = model.VPNFailureReasonUnknown
 	}
 	m.mu.Lock()
 	session := m.sessions[sessionID]
@@ -1330,6 +1341,7 @@ func (m *AgentVPNManager) markSessionFailed(sessionID string, err error) {
 		return
 	}
 	session.LastError = err.Error()
+	session.failureReason = reason
 	cancel := session.cancel
 	systemProxyApplied := session.systemProxyApplied
 	relay := session.relay
@@ -1699,12 +1711,15 @@ func (m *AgentVPNManager) failedTaskResultLocked(session *AgentVPNSession) *pb.T
 		return nil
 	}
 	payload := model.VPNControlResult{
-		SessionID: session.Request.SessionID,
-		Action:    model.VPNActionStatus,
-		Role:      session.Request.Role,
-		State:     model.VPNStateFailed,
-		LastError: session.LastError,
-		Logs:      readVPNLogTail(session.LogPath, 200),
+		SessionID:         session.Request.SessionID,
+		RuntimeInstanceID: session.Request.RuntimeInstanceID,
+		Action:            model.VPNActionStatus,
+		Role:              session.Request.Role,
+		State:             model.VPNStateFailed,
+		FailureReason:     session.failureReason,
+		LastError:         session.LastError,
+		Logs:              readVPNLogTail(session.LogPath, 200),
+		StartedAtUnix:     session.StartedAt.Unix(),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -2256,11 +2271,13 @@ func vpnFailedResult(req model.VPNControlRequest, err error) model.VPNControlRes
 		message = err.Error()
 	}
 	return model.VPNControlResult{
-		SessionID: req.SessionID,
-		Action:    req.Action,
-		Role:      req.Role,
-		State:     model.VPNStateFailed,
-		LastError: message,
+		SessionID:         req.SessionID,
+		RuntimeInstanceID: req.RuntimeInstanceID,
+		Action:            req.Action,
+		Role:              req.Role,
+		State:             model.VPNStateFailed,
+		FailureReason:     model.VPNFailureReasonUnknown,
+		LastError:         message,
 	}
 }
 

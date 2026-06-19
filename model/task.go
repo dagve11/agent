@@ -96,25 +96,35 @@ const (
 	VPNStateUnknown  = "unknown"
 )
 
+const (
+	VPNFailureReasonRelayFailed      = "relay_failed"
+	VPNFailureReasonHeartbeatTimeout = "heartbeat_timeout"
+	VPNFailureReasonExitEgressFailed = "exit_egress_failed"
+	VPNFailureReasonRuntimeInactive  = "runtime_inactive"
+	VPNFailureReasonAgentOffline     = "agent_offline"
+	VPNFailureReasonUnknown          = "unknown"
+)
+
 type VPNControlRequest struct {
-	SessionID       string            `json:"session_id"`
-	Action          string            `json:"action"`
-	Role            string            `json:"role"`
-	Mode            string            `json:"mode"`
-	RelayMode       string            `json:"relay_mode"`
-	PeerServerID    uint64            `json:"peer_server_id"`
-	RelayStreamID   string            `json:"relay_stream_id"`
-	Token           string            `json:"token"`
-	ExpiresAtUnix   int64             `json:"expires_at"`
-	ListenHTTP      string            `json:"listen_http,omitempty"`
-	ListenSOCKS     string            `json:"listen_socks,omitempty"`
-	TunName         string            `json:"tun_name,omitempty"`
-	DNSServer       string            `json:"dns_server,omitempty"`
-	Rules           VPNRules          `json:"rules"`
-	Limits          VPNLimits         `json:"limits"`
-	Core            VPNCoreSpec       `json:"core"`
-	DashboardBypass []string          `json:"dashboard_bypass"`
-	Extra           map[string]string `json:"extra,omitempty"`
+	SessionID         string            `json:"session_id"`
+	RuntimeInstanceID string            `json:"runtime_instance_id,omitempty"`
+	Action            string            `json:"action"`
+	Role              string            `json:"role"`
+	Mode              string            `json:"mode"`
+	RelayMode         string            `json:"relay_mode"`
+	PeerServerID      uint64            `json:"peer_server_id"`
+	RelayStreamID     string            `json:"relay_stream_id"`
+	Token             string            `json:"token"`
+	ExpiresAtUnix     int64             `json:"expires_at"`
+	ListenHTTP        string            `json:"listen_http,omitempty"`
+	ListenSOCKS       string            `json:"listen_socks,omitempty"`
+	TunName           string            `json:"tun_name,omitempty"`
+	DNSServer         string            `json:"dns_server,omitempty"`
+	Rules             VPNRules          `json:"rules"`
+	Limits            VPNLimits         `json:"limits"`
+	Core              VPNCoreSpec       `json:"core"`
+	DashboardBypass   []string          `json:"dashboard_bypass"`
+	Extra             map[string]string `json:"extra,omitempty"`
 }
 
 type VPNRules struct {
@@ -144,6 +154,7 @@ type VPNCoreSpec struct {
 
 type VPNControlResult struct {
 	SessionID           string   `json:"session_id"`
+	RuntimeInstanceID   string   `json:"runtime_instance_id,omitempty"`
 	Action              string   `json:"action"`
 	Role                string   `json:"role"`
 	State               string   `json:"state"`
@@ -170,6 +181,7 @@ type VPNControlResult struct {
 	UploadBytes         uint64   `json:"upload_bytes,omitempty"`
 	DownloadBytes       uint64   `json:"download_bytes,omitempty"`
 	ActiveConns         uint32   `json:"active_conns,omitempty"`
+	FailureReason       string   `json:"failure_reason,omitempty"`
 	LastError           string   `json:"last_error,omitempty"`
 	Logs                []string `json:"logs,omitempty"`
 	StartedAtUnix       int64    `json:"started_at,omitempty"`
