@@ -15,6 +15,12 @@ func TestDestroyAgentTaskTypeStaysInSyncWithDashboard(t *testing.T) {
 	if model.TaskTypeDestroyAgent != 21 {
 		t.Fatalf("TaskTypeDestroyAgent must stay 21 so dashboard and agent agree, got %d", model.TaskTypeDestroyAgent)
 	}
+	if model.TaskTypeVPNControl != 22 {
+		t.Fatalf("TaskTypeVPNControl must stay 22 so dashboard and agent agree, got %d", model.TaskTypeVPNControl)
+	}
+	if model.TaskTypeBestIPFission != 23 {
+		t.Fatalf("TaskTypeBestIPFission must stay 23 so dashboard and agent agree, got %d", model.TaskTypeBestIPFission)
+	}
 }
 
 func TestBuildDestroyAgentPlanRemovesServiceAndInstallDirectory(t *testing.T) {

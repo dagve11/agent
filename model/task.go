@@ -1,5 +1,7 @@
 package model
 
+import "github.com/nezhahq/agent/pkg/bestip"
+
 const (
 	_ = iota
 	TaskTypeHTTPGet
@@ -25,8 +27,9 @@ const (
 
 	// Dashboard uses the same fixed wire value. Do not insert new task types
 	// before this without updating both repositories.
-	TaskTypeDestroyAgent = 21
-	TaskTypeVPNControl   = 22
+	TaskTypeDestroyAgent  = 21
+	TaskTypeVPNControl    = 22
+	TaskTypeBestIPFission = 23
 )
 
 type TerminalTask struct {
@@ -40,6 +43,23 @@ type TaskNAT struct {
 
 type TaskFM struct {
 	StreamID string
+}
+
+const (
+	BestIPFissionTaskResultProgress = "progress"
+	BestIPFissionTaskResultDone     = "done"
+	BestIPFissionTaskResultError    = "error"
+)
+
+type BestIPFissionTaskRequest struct {
+	Config bestip.FissionConfig `json:"config"`
+}
+
+type BestIPFissionTaskResult struct {
+	Kind   string                       `json:"kind"`
+	Event  *bestip.FissionProgressEvent `json:"event,omitempty"`
+	Result *bestip.FissionRunResult     `json:"result,omitempty"`
+	Error  string                       `json:"error,omitempty"`
 }
 
 const (

@@ -602,6 +602,9 @@ func dispatchAgentTask(task *pb.Task, send func(*pb.TaskResult) error, cancel co
 	case model.TaskTypeVPNControl:
 		vpnControlTaskDispatcher.Dispatch(task, send, cancel)
 		return
+	case model.TaskTypeBestIPFission:
+		go handleBestIPFissionTask(task, send, cancel)
+		return
 	}
 	go runAgentTask(task, send, cancel)
 }
