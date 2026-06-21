@@ -333,6 +333,56 @@ func TestAgentVPNSystemProxyApplyAndRestoreOnStop(t *testing.T) {
 	}
 }
 
+func TestAgentVPNStopKeepsSystemProxyWhenAnotherSessionIsActive(t *testing.T) {
+	resetVPNManagerForTest(t)
+	proxy := &recordingVPNSystemProxyManager{}
+	vpnManager.systemProxyManager = proxy
+
+	activeReq := model.VPNControlRequest{
+		SessionID:   "vpn-active-system-proxy",
+		Role:        model.VPNRoleEntry,
+		Mode:        model.VPNModeSystemProxy,
+		ListenHTTP:  "127.0.0.1:8088",
+		ListenSOCKS: "127.0.0.1:1080",
+	}
+	failedReq := activeReq
+	failedReq.SessionID = "vpn-failed-system-proxy"
+
+	vpnManager.mu.Lock()
+	vpnManager.sessions[activeReq.SessionID] = &AgentVPNSession{
+		Request:            activeReq,
+		State:              model.VPNStateRunning,
+		systemProxyApplied: true,
+	}
+	vpnManager.sessions[failedReq.SessionID] = &AgentVPNSession{
+		Request:            failedReq,
+		State:              model.VPNStateRunning,
+		systemProxyApplied: true,
+	}
+	vpnManager.mu.Unlock()
+
+	logs, err := vpnManager.stopTrackedSession(failedReq, false, false, false)
+	if err != nil {
+		t.Fatalf("stop failed sibling session: %v", err)
+	}
+	if proxy.restoreCalls != 0 {
+		t.Fatalf("failed sibling cleanup must not restore global system proxy while another session is active, got %d", proxy.restoreCalls)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "system_proxy_restore=skipped: active-session") {
+		t.Fatalf("failed sibling cleanup must report skipped system proxy restore, got %#v", logs)
+	}
+	active, ok := vpnManager.Get(activeReq.SessionID)
+	if !ok {
+		t.Fatal("active sibling session must remain tracked")
+	}
+	if !active.systemProxyApplied {
+		t.Fatal("active sibling session must keep system proxy ownership")
+	}
+	if _, ok := vpnManager.Get(failedReq.SessionID); ok {
+		t.Fatal("stopped sibling session must be removed")
+	}
+}
+
 func TestAgentVPNSystemProxyStartSkipsClearWhenAlreadyApplied(t *testing.T) {
 	resetVPNManagerForTest(t)
 	proxy := &recordingVPNSystemProxyManager{inspection: vpnSystemProxyInspection{Applied: true, Status: "applied"}}
@@ -1563,6 +1613,64 @@ func TestAgentVPNCleanupStaleSessionsSkipsActiveTrackedSession(t *testing.T) {
 	}
 	if _, ok := vpnManager.Get(sessionID); !ok {
 		t.Fatal("active session must remain tracked after stale cleanup")
+	}
+}
+
+func TestAgentVPNCleanupStaleSessionsSkipsSystemProxyRestoreWhenAnotherSessionIsActive(t *testing.T) {
+	resetVPNManagerForTest(t)
+	proxy := &recordingVPNSystemProxyManager{}
+	vpnManager.systemProxyManager = proxy
+
+	const staleSessionID = "vpn-stale-system-proxy"
+	statePath := vpnSessionStatePath(vpnManager.effectiveWorkDir(), staleSessionID)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	state := agentVPNSessionState{
+		Version:            1,
+		SessionID:          staleSessionID,
+		Role:               model.VPNRoleEntry,
+		Mode:               model.VPNModeSystemProxy,
+		State:              model.VPNStateRunning,
+		SystemProxyApplied: true,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	activeReq := model.VPNControlRequest{
+		SessionID:   "vpn-active-system-proxy",
+		Role:        model.VPNRoleEntry,
+		Mode:        model.VPNModeSystemProxy,
+		ListenHTTP:  "127.0.0.1:8088",
+		ListenSOCKS: "127.0.0.1:1080",
+	}
+	vpnManager.mu.Lock()
+	vpnManager.sessions[activeReq.SessionID] = &AgentVPNSession{
+		Request:            activeReq,
+		State:              model.VPNStateRunning,
+		systemProxyApplied: true,
+	}
+	vpnManager.mu.Unlock()
+
+	vpnManager.CleanupStaleSessions()
+
+	if proxy.restoreCalls != 0 {
+		t.Fatalf("stale cleanup must not restore global system proxy while another session is active, got %d", proxy.restoreCalls)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("stale session state should be removed after skipped proxy restore, stat err=%v", err)
+	}
+	active, ok := vpnManager.Get(activeReq.SessionID)
+	if !ok {
+		t.Fatal("active session must remain tracked after stale cleanup")
+	}
+	if !active.systemProxyApplied {
+		t.Fatal("active session must keep system proxy ownership after stale cleanup")
 	}
 }
 

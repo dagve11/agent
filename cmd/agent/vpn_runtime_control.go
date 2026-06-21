@@ -176,8 +176,12 @@ func (m *AgentVPNManager) applySessionSystemProxyControl(session *AgentVPNSessio
 		return "[control] system_proxy=applied", nil
 	}
 	if session.systemProxyApplied {
-		if err := m.restoreSessionSystemProxy(session); err != nil {
+		restoreResult, err := m.restoreSessionSystemProxy(session)
+		if err != nil {
 			return "", fmt.Errorf("restore VPN system proxy for session %s: %w", req.SessionID, err)
+		}
+		if restoreResult == vpnSystemProxyRestoreSkippedActiveSession {
+			return "[control] system_proxy=kept-active-session", nil
 		}
 		return "[control] system_proxy=cleared", nil
 	}

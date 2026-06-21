@@ -135,6 +135,14 @@ type agentVPNSessionState struct {
 	UpdatedAt          time.Time `json:"updated_at,omitempty"`
 }
 
+type vpnSystemProxyRestoreResult string
+
+const (
+	vpnSystemProxyRestoreNone                 vpnSystemProxyRestoreResult = ""
+	vpnSystemProxyRestoreOK                   vpnSystemProxyRestoreResult = "ok"
+	vpnSystemProxyRestoreSkippedActiveSession vpnSystemProxyRestoreResult = "skipped-active-session"
+)
+
 func defaultVPNIOStreamFactory(ctx context.Context) (vpnIOStream, error) {
 	if client == nil {
 		return nil, errors.New("dashboard client is not connected")
@@ -283,11 +291,11 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	}
 	if err := m.persistSessionState(session); err != nil {
 		cleanupLogs := make([]string, 0, 4)
-		systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
+		systemProxyRestoreResult, systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
 		if systemProxyRestoreErr != nil {
 			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
-		} else if shouldApplyVPNSystemProxy(req) {
-			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
+		} else {
+			cleanupLogs = appendSystemProxyRestoreCleanupLog(cleanupLogs, systemProxyRestoreResult)
 		}
 		_ = bridge.Close()
 		if session.sharedExitRuntimeKey != "" {
@@ -318,11 +326,11 @@ func (m *AgentVPNManager) Start(req model.VPNControlRequest) (model.VPNControlRe
 	logs, err := m.probeSessionEgress(req)
 	if err != nil {
 		cleanupLogs := append([]string(nil), logs...)
-		systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
+		systemProxyRestoreResult, systemProxyRestoreErr := m.restoreSessionSystemProxy(session)
 		if systemProxyRestoreErr != nil {
 			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
-		} else if shouldApplyVPNSystemProxy(req) {
-			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
+		} else {
+			cleanupLogs = appendSystemProxyRestoreCleanupLog(cleanupLogs, systemProxyRestoreResult)
 		}
 		_ = bridge.Close()
 		if session.sharedExitRuntimeKey != "" {
@@ -564,11 +572,12 @@ func (m *AgentVPNManager) stopTrackedSession(req model.VPNControlRequest, failOn
 		}
 	}
 	if systemProxyRestoreErr == nil {
-		systemProxyRestoreErr = m.restoreSessionSystemProxy(session)
+		var restoreResult vpnSystemProxyRestoreResult
+		restoreResult, systemProxyRestoreErr = m.restoreSessionSystemProxy(session)
 		if systemProxyRestoreErr != nil {
 			logs = append(logs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
 		} else if systemProxyWasApplied {
-			logs = append(logs, "[cleanup] system_proxy_restore=ok")
+			logs = appendSystemProxyRestoreCleanupLog(logs, restoreResult)
 		}
 	}
 	if session != nil && session.relay != nil {
@@ -1431,10 +1440,11 @@ func (m *AgentVPNManager) markSessionFailedWithReasonAndLogsIfCurrent(sessionID 
 	}
 	var systemProxyRestoreErr error
 	if systemProxyApplied {
-		if systemProxyRestoreErr = m.restoreSessionSystemProxy(session); systemProxyRestoreErr != nil {
+		var restoreResult vpnSystemProxyRestoreResult
+		if restoreResult, systemProxyRestoreErr = m.restoreSessionSystemProxy(session); systemProxyRestoreErr != nil {
 			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=failed: "+systemProxyRestoreErr.Error())
 		} else {
-			cleanupLogs = append(cleanupLogs, "[cleanup] system_proxy_restore=ok")
+			cleanupLogs = appendSystemProxyRestoreCleanupLog(cleanupLogs, restoreResult)
 		}
 	}
 	if relay != nil {
@@ -1503,14 +1513,21 @@ func (m *AgentVPNManager) CleanupStaleSessions() {
 			continue
 		}
 		if state.SystemProxyApplied && m.systemProxyManager != nil {
-			if err := m.systemProxyManager.Restore(); err != nil {
+			if m.hasActiveSystemProxySession(nil) {
+				state.SystemProxyApplied = false
+				if err := writeAgentVPNSessionState(vpnSessionStatePath(m.effectiveWorkDir(), state.SessionID), state); err != nil {
+					printf("VPN stale system proxy state update failed for session %s: %v", state.SessionID, err)
+					continue
+				}
+			} else if err := m.systemProxyManager.Restore(); err != nil {
 				printf("VPN stale system proxy restore failed for session %s: %v", state.SessionID, err)
 				continue
-			}
-			state.SystemProxyApplied = false
-			if err := writeAgentVPNSessionState(vpnSessionStatePath(m.effectiveWorkDir(), state.SessionID), state); err != nil {
-				printf("VPN stale system proxy state update failed for session %s: %v", state.SessionID, err)
-				continue
+			} else {
+				state.SystemProxyApplied = false
+				if err := writeAgentVPNSessionState(vpnSessionStatePath(m.effectiveWorkDir(), state.SessionID), state); err != nil {
+					printf("VPN stale system proxy state update failed for session %s: %v", state.SessionID, err)
+					continue
+				}
 			}
 		}
 		if state.SidecarPID > 0 {
@@ -1739,16 +1756,20 @@ func (m *AgentVPNManager) clearForeignSystemProxyBeforeApply(req model.VPNContro
 	return m.clearSessionSystemProxy()
 }
 
-func (m *AgentVPNManager) restoreSessionSystemProxy(session *AgentVPNSession) error {
+func (m *AgentVPNManager) restoreSessionSystemProxy(session *AgentVPNSession) (vpnSystemProxyRestoreResult, error) {
 	if session == nil || !session.systemProxyApplied || m.systemProxyManager == nil {
-		return nil
+		return vpnSystemProxyRestoreNone, nil
+	}
+	if m.hasActiveSystemProxySession(session) {
+		session.systemProxyApplied = false
+		return vpnSystemProxyRestoreSkippedActiveSession, nil
 	}
 	if err := m.systemProxyManager.Restore(); err != nil {
 		printf("VPN system proxy restore failed: %v", err)
-		return err
+		return vpnSystemProxyRestoreNone, err
 	}
 	session.systemProxyApplied = false
-	return nil
+	return vpnSystemProxyRestoreOK, nil
 }
 
 func (m *AgentVPNManager) clearSessionSystemProxy() error {
@@ -1760,6 +1781,41 @@ func (m *AgentVPNManager) clearSessionSystemProxy() error {
 		return err
 	}
 	return nil
+}
+
+func (m *AgentVPNManager) hasActiveSystemProxySession(exclude *AgentVPNSession) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, session := range m.sessions {
+		if session == nil {
+			continue
+		}
+		if exclude != nil && (session == exclude || session.Request.SessionID == exclude.Request.SessionID) {
+			continue
+		}
+		if session.State != model.VPNStateRunning || !session.systemProxyApplied {
+			continue
+		}
+		if session.Request.Role == model.VPNRoleEntry && session.Request.Mode == model.VPNModeSystemProxy {
+			return true
+		}
+	}
+	return false
+}
+
+func appendSystemProxyRestoreCleanupLog(logs []string, result vpnSystemProxyRestoreResult) []string {
+	switch result {
+	case vpnSystemProxyRestoreOK:
+		return append(logs, "[cleanup] system_proxy_restore=ok")
+	case vpnSystemProxyRestoreSkippedActiveSession:
+		return append(logs, "[cleanup] system_proxy_restore=skipped: active-session")
+	default:
+		return logs
+	}
 }
 
 func (m *AgentVPNManager) probeSessionTunHealth(req model.VPNControlRequest) error {
