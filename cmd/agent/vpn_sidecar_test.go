@@ -361,12 +361,21 @@ func TestAgentVPNStopKeepsSystemProxyWhenAnotherSessionIsActive(t *testing.T) {
 	}
 	vpnManager.mu.Unlock()
 
-	logs, err := vpnManager.stopTrackedSession(failedReq, false, false, false)
+	logs, err := vpnManager.stopTrackedSession(failedReq, false, false, true)
 	if err != nil {
 		t.Fatalf("stop failed sibling session: %v", err)
 	}
+	if proxy.clearCalls != 0 {
+		t.Fatalf("failed sibling cleanup must not clear global system proxy while another session is active, got %d", proxy.clearCalls)
+	}
 	if proxy.restoreCalls != 0 {
 		t.Fatalf("failed sibling cleanup must not restore global system proxy while another session is active, got %d", proxy.restoreCalls)
+	}
+	if proxy.applyCalls != 1 || proxy.lastHTTP != activeReq.ListenHTTP || proxy.lastSOCKS != activeReq.ListenSOCKS {
+		t.Fatalf("failed sibling cleanup must reapply the active session proxy, got %#v", proxy)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "system_proxy_clear=skipped: active-session") {
+		t.Fatalf("failed sibling cleanup must report skipped system proxy clear, got %#v", logs)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "system_proxy_restore=skipped: active-session") {
 		t.Fatalf("failed sibling cleanup must report skipped system proxy restore, got %#v", logs)
@@ -1661,6 +1670,9 @@ func TestAgentVPNCleanupStaleSessionsSkipsSystemProxyRestoreWhenAnotherSessionIs
 
 	if proxy.restoreCalls != 0 {
 		t.Fatalf("stale cleanup must not restore global system proxy while another session is active, got %d", proxy.restoreCalls)
+	}
+	if proxy.applyCalls != 1 || proxy.lastHTTP != activeReq.ListenHTTP || proxy.lastSOCKS != activeReq.ListenSOCKS {
+		t.Fatalf("stale cleanup must reapply the active session proxy, got %#v", proxy)
 	}
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
 		t.Fatalf("stale session state should be removed after skipped proxy restore, stat err=%v", err)
